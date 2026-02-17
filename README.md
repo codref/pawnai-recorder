@@ -1,6 +1,6 @@
-# TapMeIn
+# PawnAI Recorder
 
-A Python audio recording application with real-time dB level metering using PyAudio.
+A Python audio recording and management CLI with real-time dB level metering.
 
 ## Features
 
@@ -19,10 +19,10 @@ A Python audio recording application with real-time dB level metering using PyAu
 pip install -e .
 ```
 
-After installation, you can run the `tapmein` command from anywhere:
+After installation, you can run the `pawnai-recorder` command from anywhere:
 
 ```bash
-tapmein --help
+pawnai-recorder --help
 ```
 
 ### Development installation
@@ -38,13 +38,13 @@ pip install -e ".[dev]"
 ### List available audio devices
 
 ```bash
-tapmein list-devices
+pawnai-recorder list-devices
 ```
 
 Filter by driver type:
 
 ```bash
-tapmein list-devices --driver pulse
+pawnai-recorder list-devices --driver pulse
 ```
 
 ### Record audio
@@ -52,37 +52,37 @@ tapmein list-devices --driver pulse
 Start recording with interactive device selection:
 
 ```bash
-tapmein record
+pawnai-recorder record
 ```
 
 Record for a specific duration (in seconds):
 
 ```bash
-tapmein record --duration 60
+pawnai-recorder record --duration 60
 ```
 
 Specify device ID directly:
 
 ```bash
-tapmein record --device-id 0
+pawnai-recorder record --device-id 0
 ```
 
 Apply input gain:
 
 ```bash
-tapmein record --gain 2.0  # 2x amplification (+6dB)
+pawnai-recorder record --gain 2.0  # 2x amplification (+6dB)
 ```
 
 Specify custom output directory:
 
 ```bash
-tapmein record --output ./my-recordings/
+pawnai-recorder record --output ./my-recordings/
 ```
 
 ### Combined example
 
 ```bash
-tapmein record --device-id 0 --duration 30 --output ./recordings/ --gain 1.5
+pawnai-recorder record --device-id 0 --duration 30 --output ./recordings/ --gain 1.5
 ```
 
 ## Running as a module
@@ -90,22 +90,31 @@ tapmein record --device-id 0 --duration 30 --output ./recordings/ --gain 1.5
 You can also run the application as a Python module:
 
 ```bash
-python -m tapmein record
+python -m pawnai_recorder record
 ```
 
 ## Project Structure
 
 ```
-tapmein/
-├── src/
-│   └── tapmein/
-│       ├── __init__.py       # Package initialization
-│       ├── __main__.py       # Module entry point (python -m tapmein)
-│       └── main.py           # Main application code
+pawnai-recorder/
+├── pawnai_recorder/
+│   ├── __init__.py
+│   ├── __main__.py
+│   ├── cli/
+│   │   ├── commands.py
+│   │   └── utils.py
+│   ├── core/
+│   │   ├── config.py
+│   │   ├── recording.py
+│   │   ├── storage.py
+│   │   └── processing.py
+│   └── utils/
 ├── audio/                    # Default output directory for recordings
-├── pyproject.toml            # Modern Python packaging configuration
-├── setup.py                  # Minimal compatibility shim
-├── requirements.txt          # Dependencies
+├── docs/
+├── tests/
+├── pyproject.toml
+├── setup.py
+├── requirements.txt
 └── README.md                 # This file
 ```
 
