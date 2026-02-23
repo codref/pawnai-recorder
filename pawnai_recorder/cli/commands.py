@@ -5,6 +5,7 @@ This module provides all command-line interface commands using Typer.
 
 import sys
 import time
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -17,10 +18,23 @@ from pawnai_recorder.core import (
     RecordingEngine,
     draw_db_bar,
 )
-from pawnai_recorder.core.config import RATE, RECORDING_CHUNK_SIZE, FILE_EXTENSION, CHUNK_DIR
-from pawnai_recorder.cli.utils import console
+from pawnai_recorder.core.s3_upload import S3Uploader
+from pawnai_recorder.core.config import (
+    AppConfig, RATE, RECORDING_CHUNK_SIZE, FILE_EXTENSION, CHUNK_DIR,
+    TIMESTAMP_FORMAT, DATETIME_FORMAT,
+)
+from pawnai_recorder.core.log import RecordingLogger
+from pawnai_recorder.cli.utils import console, suppress_stderr
 
 app = typer.Typer(help="Professional audio recording and management CLI")
+
+app_config = AppConfig()
+default_output_dir = str(app_config.get("output_dir", CHUNK_DIR))
+default_rate = int(app_config.get("rate", RATE))
+default_chunk_size = int(app_config.get("chunk_size", RECORDING_CHUNK_SIZE))
+default_file_extension = str(app_config.get("file_extension", FILE_EXTENSION))
+default_timestamp_format = str(app_config.get("timestamp_format", TIMESTAMP_FORMAT))
+default_datetime_format = str(app_config.get("datetime_format", DATETIME_FORMAT))
 
 # Terminal UI
 term = Terminal()
@@ -31,9 +45,16 @@ def list_devices(
     driver: Optional[str] = typer.Option(
         None, help="Filter by driver type: pulse, alsa, jack, usb, default"
     ),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Show debug output from audio libraries"
+    ),
 ):
     """List all available input audio devices."""
-    RecordingEngine.list_devices(driver_filter=driver)
+    if verbose:
+        RecordingEngine.list_devices(driver_filter=driver)
+    else:
+        with suppress_stderr():
+            RecordingEngine.list_devices(driver_filter=driver)
 
 
 @app.command()
@@ -41,9 +62,9 @@ def record(
     duration: Optional[int] = typer.Option(
         None, help="Recording duration in seconds. Leave empty for continuous recording."
     ),
-    output: str = typer.Option(CHUNK_DIR, help="Output directory for recordings"),
-    rate: int = typer.Option(RATE, help="Sample rate in Hz"),
-    chunk_size: int = typer.Option(RECORDING_CHUNK_SIZE, help="Frames per chunk"),
+    output: str = typer.Option(default_output_dir, help="Output directory for recordings"),
+    rate: int = typer.Option(default_rate, help="Sample rate in Hz"),
+    chunk_size: int = typer.Option(default_chunk_size, help="Frames per chunk"),
     device_id: Optional[int] = typer.Option(
         None, help="Audio device ID to use. Leave empty to select interactively."
     ),
@@ -54,16 +75,63 @@ def record(
         1.0, help="Input gain/amplification factor (1.0=no change, 2.0=+6dB, 0.5=-6dB)"
     ),
     format: str = typer.Option(
-        FILE_EXTENSION, help="Audio format: flac (lossless), ogg (lossy), wav (uncompressed), mp3 (16kHz mono)"
+        default_file_extension,
+        help="Audio format: flac (lossless), ogg (lossy), wav (uncompressed), mp3 (16kHz mono)",
+    ),
+    conversation_id: Optional[str] = typer.Option(
+        None, help="Optional conversation ID to organize S3 uploads as conversation_id/timestamp/filename."
+    ),
+    upload: bool = typer.Option(
+        True,
+        "--upload/--no-upload",
+        help="Enable upload by default; use --no-upload to bypass S3 upload for this recording.",
+    ),
+    timestamp_format: str = typer.Option(
+        default_timestamp_format,
+        help=(
+            "Format string for the session/chunk timestamp used in filenames. "
+            "Placeholders: {ts} (datetime), {device_id}. "
+            "Example: '{ts}_dev{device_id}'  →  '231015143022_dev3'"
+        ),
+    ),
+    datetime_format: str = typer.Option(
+        default_datetime_format,
+        help="strftime format applied to the {ts} placeholder. Default: '%%y%%m%%d%%H%%M%%S'.",
+    ),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Show debug output from audio libraries"
+    ),
+    log_file: Optional[str] = typer.Option(
+        None,
+        help=(
+            "Override the recording log filename (relative to --output directory). "
+            "Defaults to the value from .pawnai-recorder.yml or 'recordings.jsonl'."
+        ),
     ),
 ):
     """Start a new audio recording."""
+    # Configure loguru log level based on verbose flag
+    logger.remove()
+    if verbose:
+        logger.add(sys.stderr, level="DEBUG")
+    else:
+        logger.add(sys.stderr, level="WARNING")
+
     # Ensure output directory ends with /
     output_dir = output if output.endswith('/') else output + '/'
 
+    # Initialise the recording log
+    _log_path = Path(output_dir) / log_file if log_file else app_config.get_log_path(Path(output_dir))
+    recording_logger = RecordingLogger(_log_path)
+    console.print(f'[dim]📝 Recording log: {_log_path}[/dim]')
+
     # List devices and get user selection if not specified
     if device_id is None:
-        input_devices = RecordingEngine.list_devices(driver_filter=driver)
+        if verbose:
+            input_devices = RecordingEngine.list_devices(driver_filter=driver)
+        else:
+            with suppress_stderr():
+                input_devices = RecordingEngine.list_devices(driver_filter=driver)
         if not input_devices:
             console.print(
                 f"[error]✗ No input devices found"
@@ -74,7 +142,11 @@ def record(
         try:
             import pyaudio
 
-            audio = pyaudio.PyAudio()
+            if verbose:
+                audio = pyaudio.PyAudio()
+            else:
+                with suppress_stderr():
+                    audio = pyaudio.PyAudio()
             default_device = audio.get_default_input_device_info()
             # Try to find default device in filtered list
             default_device_id = int(default_device['index']) if default_device else -1
@@ -115,8 +187,23 @@ def record(
             show_level_meter=True,
             gain_factor=gain,
             file_format=format,
+            conversation_id=conversation_id,
+            upload_enabled=upload,
+            verbose=verbose,
+            timestamp_format=timestamp_format,
+            datetime_format=datetime_format,
+            recording_logger=recording_logger,
         )
-        stream.start_recording()
+        if verbose:
+            stream.start_recording()
+        else:
+            with suppress_stderr():
+                stream.start_recording()
+
+        if upload:
+            console.print("[info]☁️ Upload mode: enabled (use --no-upload to bypass)[/info]")
+        else:
+            console.print("[warning]☁️ Upload mode: bypassed for this run[/warning]")
 
         if gain != 1.0:
             db_gain = 20 * np.log10(gain) if gain > 0 else 0
@@ -168,25 +255,43 @@ def monitor(
     duration: Optional[int] = typer.Option(
         None, help="Monitor duration in seconds. Leave empty for continuous monitoring."
     ),
-    rate: int = typer.Option(RATE, help="Sample rate in Hz"),
-    chunk_size: int = typer.Option(RECORDING_CHUNK_SIZE, help="Frames per chunk"),
+    rate: int = typer.Option(default_rate, help="Sample rate in Hz"),
+    chunk_size: int = typer.Option(default_chunk_size, help="Frames per chunk"),
     interval: float = typer.Option(0.2, help="Refresh interval in seconds (larger = less flicker)"),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Show debug output from audio libraries"
+    ),
 ):
     """Monitor all audio devices in real-time to identify which has audio.
     
     Shows live audio levels for all connected input devices.
     Press Ctrl+C to stop monitoring.
     """
+    # Configure loguru log level based on verbose flag
+    logger.remove()
+    if verbose:
+        logger.add(sys.stderr, level="DEBUG")
+    else:
+        logger.add(sys.stderr, level="WARNING")
+
     import pyaudio
     
     # Get list of all input devices
-    all_input_devices = RecordingEngine.list_devices()
+    if verbose:
+        all_input_devices = RecordingEngine.list_devices()
+    else:
+        with suppress_stderr():
+            all_input_devices = RecordingEngine.list_devices()
     if not all_input_devices:
         console.print("[error]✗ No input devices found[/error]")
         sys.exit(1)
     
     # Test each device and filter out unavailable ones
-    audio = pyaudio.PyAudio()
+    if verbose:
+        audio = pyaudio.PyAudio()
+    else:
+        with suppress_stderr():
+            audio = pyaudio.PyAudio()
     device_names = {}
     streams = {}
     available_devices = []
@@ -299,12 +404,47 @@ def monitor(
 
 
 @app.command()
-def status():
-    """Show system and device information."""
+def status(
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Show debug output from audio libraries"
+    ),
+):
+    """Show system, device and optional S3 storage information.
+
+    If an S3 configuration is present in ``.pawnai-recorder.yml`` the command
+    will attempt a lightweight health check on the configured bucket and
+    report whether it is reachable.
+    """
+    # Configure loguru log level based on verbose flag
+    logger.remove()
+    if verbose:
+        logger.add(sys.stderr, level="DEBUG")
+    else:
+        logger.add(sys.stderr, level="WARNING")
+
     console.print("[bold]📋 PawnAI Recorder Status[/bold]")
     console.print()
     console.print("[info]Available Input Devices:[/info]")
     try:
-        RecordingEngine.list_devices()
+        if verbose:
+            RecordingEngine.list_devices()
+        else:
+            with suppress_stderr():
+                RecordingEngine.list_devices()
     except Exception as e:
         console.print(f"[error]✗ Error listing devices: {e}[/error]")
+
+    # S3 storage status
+    s3_conf = app_config.get_s3_config()
+    if not s3_conf:
+        console.print("[dim]S3 storage not configured[/dim]")
+    else:
+        try:
+            uploader = S3Uploader.from_dict(s3_conf)
+            available = uploader.check_bucket()
+            if available:
+                console.print(f"[info]S3 storage available: bucket {uploader.bucket}[/info]")
+            else:
+                console.print(f"[warning]S3 storage not reachable (bucket: {uploader.bucket})[/warning]")
+        except Exception as e:  # include config errors
+            console.print(f"[error]Failed to initialize S3 client: {e}[/error]")

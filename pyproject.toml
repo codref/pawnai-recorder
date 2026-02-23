@@ -36,6 +36,8 @@ dependencies = [
     "soundfile>=0.12.1",
     "scipy>=1.7.0",
     "pydub>=0.25.1",
+    "boto3>=1.34.0",
+    "PyYAML>=6.0.1",
 ]
 
 [project.urls]
@@ -57,7 +59,7 @@ dev = [
 ]
 
 [tool.setuptools]
-packages = ["pawnai_recorder"]
+packages = ["pawnai_recorder", "pawnai_recorder.cli", "pawnai_recorder.core", "pawnai_recorder.utils"]
 
 [tool.black]
 line-length = 100

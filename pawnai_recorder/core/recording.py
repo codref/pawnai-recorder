@@ -2,11 +2,59 @@
 
 This module provides real-time audio capture capabilities with support for
 multiple audio devices and formats.
+
+Main public classes
+-------------------
+:class:`RecordingEngine`
+    Static helpers for enumerating available input devices.
+
+:class:`MicrophoneStream`
+    Streams audio from a PyAudio input device and saves it to disk in
+    configurable chunks.  The stream is **non-blocking**: audio is captured
+    in a callback thread and written to files by separate daemon threads so
+    the caller only needs a lightweight polling loop.
+
+Timestamp / filename formatting
+-------------------------------
+Every session and individual chunk file is named using a configurable
+timestamp template.  Pass ``timestamp_format`` and/or ``datetime_format`` to
+:class:`MicrophoneStream` (or set them as CLI options / YAML config entries)
+to customise how filenames look.
+
+Supported ``timestamp_format`` placeholders:
+
+==================  ==========================================================
+Placeholder         Example value
+==================  ==========================================================
+``{ts}``            ``231015143022``  (shaped by ``datetime_format``)
+``{device_id}``     ``3``  (numeric device ID; ``'default'`` when not set)
+==================  ==========================================================
+
+Examples::
+
+    # default – datetime only
+    MicrophoneStream(timestamp_format='{ts}', device_id=3)
+    # session_id → '231015143022'
+    # files     → audio/231015143022_01.flac
+
+    # include device ID
+    MicrophoneStream(timestamp_format='{ts}_dev{device_id}', device_id=3)
+    # session_id → '231015143022_dev3'
+    # files     → audio/231015143022_dev3_01.flac
+
+    # ISO-style date with device tag
+    MicrophoneStream(
+        timestamp_format='{ts}_dev{device_id}',
+        datetime_format='%Y-%m-%dT%H%M%S',
+        device_id=3,
+    )
+    # files → audio/2023-10-15T143022_dev3_01.flac
 """
 
 import datetime
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
 from threading import Thread
 from typing import Optional
@@ -22,8 +70,15 @@ try:
 except ImportError:
     PYDUB_AVAILABLE = False
 
-from .config import RATE, CHUNK, CHANNEL, RECORDING_CHUNK_SIZE, FILE_EXTENSION, MP3_REQUIRED_RATE, MP3_REQUIRED_CHANNELS
+from .config import (
+    RATE, CHUNK, CHANNEL, RECORDING_CHUNK_SIZE, FILE_EXTENSION,
+    MP3_REQUIRED_RATE, MP3_REQUIRED_CHANNELS,
+    TIMESTAMP_FORMAT, DATETIME_FORMAT,
+)
 from .processing import apply_gain, calculate_db_level
+from .config import AppConfig
+from .log import RecordingLogger
+from .s3_upload import S3Uploader
 
 
 class RecordingEngine:
@@ -86,6 +141,12 @@ class MicrophoneStream:
         show_level_meter: bool = True,
         gain_factor: float = 1.0,
         file_format: str = FILE_EXTENSION,
+        conversation_id: Optional[str] = None,
+        upload_enabled: bool = True,
+        verbose: bool = False,
+        timestamp_format: str = TIMESTAMP_FORMAT,
+        datetime_format: str = DATETIME_FORMAT,
+        recording_logger: Optional[RecordingLogger] = None,
     ) -> None:
         """Initialize the microphone stream.
 
@@ -98,6 +159,14 @@ class MicrophoneStream:
             show_level_meter: Whether to show level meter
             gain_factor: Input gain factor
             file_format: Audio format (flac, ogg, wav, mp3, etc.)
+            conversation_id: Optional conversation ID for S3 uploads
+            upload_enabled: Whether S3 upload is enabled
+            verbose: Enable verbose/debug output
+            timestamp_format: Python format string for the session/chunk timestamp.
+                Supported placeholders: ``{ts}`` (datetime string), ``{device_id}``.
+                Example: ``'{ts}_dev{device_id}'``  →  ``'231015143022_dev3'``
+            datetime_format: strftime format applied to ``{ts}``.
+                Default: ``'%y%m%d%H%M%S'``
 
         Raises:
             ValueError: If MP3 format is requested with invalid sample rate or channels
@@ -123,17 +192,71 @@ class MicrophoneStream:
         self._show_level_meter = show_level_meter
         self._gain_factor = gain_factor
         self._file_format = file_format
+        self._conversation_id = conversation_id
+        self._upload_enabled = upload_enabled
+        self._verbose = verbose
         self._current_db_level = 0
+        self._timestamp_format = timestamp_format
+        self._datetime_format = datetime_format
 
         self._audio_interface = None
         self._audio_stream = None
 
         self._recording_frames = []
         self._count = 0
-        self._session_id = datetime.datetime.now().strftime('%y%m%d%H%M%S')
+        self._session_id = self._build_timestamp(device_id=device_id)
+        self._uploader: Optional[S3Uploader] = None
+
+        # Recording logger and session tracking
+        self._recording_logger = recording_logger
+        self._session_started_at: Optional[datetime.datetime] = None
+        self._total_duration_sec: float = 0.0
+        self._save_lock = threading.Lock()
+        self._saving_threads: list = []
+
+        self._initialize_uploader()
 
         # Create output directory if it doesn't exist
         Path(self._output_dir).mkdir(parents=True, exist_ok=True)
+
+    def _build_timestamp(
+        self,
+        dt: Optional[datetime.datetime] = None,
+        device_id: Optional[int] = None,
+    ) -> str:
+        """Build a timestamp string from the configured format.
+
+        Args:
+            dt: Datetime to format. Defaults to ``datetime.datetime.now()``.
+            device_id: Device ID to embed. Falls back to ``self._device_id`` when
+                omitted; uses the string ``'default'`` if neither is set.
+
+        Returns:
+            Formatted timestamp string ready to use in filenames.
+        """
+        if dt is None:
+            dt = datetime.datetime.now()
+        ts = dt.strftime(self._datetime_format)
+        dev = device_id if device_id is not None else (
+            self._device_id if self._device_id is not None else 'default'
+        )
+        return self._timestamp_format.format(ts=ts, device_id=dev)
+
+    def _initialize_uploader(self) -> None:
+        """Initialize optional S3 uploader from YAML configuration."""
+        if not self._upload_enabled:
+            logger.info('S3 upload disabled by CLI flag')
+            return
+
+        try:
+            app_config = AppConfig()
+            s3_config = app_config.get_s3_config()
+            if not s3_config:
+                logger.warning('S3 upload disabled: no `s3` config found in .pawnai-recorder.yml')
+                return
+            self._uploader = S3Uploader.from_dict(s3_config)
+        except Exception as error:
+            logger.warning(f'S3 upload disabled: {error}')
 
     def start_recording(self) -> None:
         """Start the recording stream."""
@@ -146,6 +269,7 @@ class MicrophoneStream:
 
         # Update the rate to match device's native rate
         self._rate = device_sample_rate
+        self._session_started_at = datetime.datetime.now()
 
         self._audio_stream = self._audio_interface.open(
             format=self._sample_width,
@@ -156,10 +280,23 @@ class MicrophoneStream:
             frames_per_buffer=self._chunk,
             stream_callback=self._fill_buffer,
         )
-        logger.info(f'Recording started. Session ID: {self._session_id}')
-        logger.info(f'Device: {device_name} (ID: {self._device_id})')
-        logger.info(f'Sample Rate: {self._rate} Hz')
-        logger.info(f'Output directory: {self._output_dir}')
+        from pawnai_recorder.cli.utils import console
+        console.print(f'[info]🎙 Recording started. Session ID: {self._session_id}[/info]')
+        console.print(f'[info]🎙 Device: {device_name} (ID: {self._device_id})[/info]')
+        console.print(f'[info]🎙 Sample Rate: {self._rate} Hz[/info]')
+        console.print(f'[info]🎙 Output directory: {self._output_dir}[/info]')
+
+        if self._recording_logger is not None:
+            self._recording_logger.write_session_start(
+                session_id=self._session_id,
+                conversation_id=self._conversation_id,
+                device_id=self._device_id,
+                device_name=device_name,
+                sample_rate=self._rate,
+                channels=self._channel,
+                format=self._file_format,
+                started_at=self._session_started_at,
+            )
 
     def stop_recording(self) -> None:
         """Close the recording stream and save any remaining frames."""
@@ -175,6 +312,19 @@ class MicrophoneStream:
             self._count += 1
 
             self._create_chunk_saving_thread(saving_frames, self._count)
+
+        # Wait for all chunk-saving threads to complete before writing session end
+        with self._save_lock:
+            threads_snapshot = list(self._saving_threads)
+        for t in threads_snapshot:
+            t.join(timeout=30.0)
+
+        if self._recording_logger is not None:
+            self._recording_logger.write_session_end(
+                session_id=self._session_id,
+                total_duration_sec=self._total_duration_sec,
+                chunk_count=self._count,
+            )
 
         logger.info('Microphone has been closed')
 
@@ -228,23 +378,27 @@ class MicrophoneStream:
             saving_frames: Frames to save
             count: Chunk count
         """
-        created_at = datetime.datetime.now().strftime('%y%m%d%H%M%S')
+        created_at = self._build_timestamp()
+        chunk_started_at = datetime.datetime.now()
 
         saving_thread = Thread(
             target=self._save,
-            args=(saving_frames, count, created_at,),
+            args=(saving_frames, count, created_at, chunk_started_at),
             daemon=True,
         )
         saving_thread.start()
+        with self._save_lock:
+            self._saving_threads.append(saving_thread)
         logger.info(f'Saving chunk {count} (session: {self._session_id})')
 
-    def _save(self, frames, count, start_time):
+    def _save(self, frames, count, start_time, chunk_started_at=None):
         """Save audio frames to file.
 
         Args:
             frames: List of audio frames
             count: Chunk number
-            start_time: Start timestamp
+            start_time: Start timestamp string
+            chunk_started_at: datetime when this chunk started recording
         """
         # Ensure output directory has trailing slash
         output_dir = self._output_dir if self._output_dir.endswith('/') else self._output_dir + '/'
@@ -263,7 +417,36 @@ class MicrophoneStream:
 
                 # Write with soundfile (supports FLAC, OGG, WAV, etc.)
                 sf.write(filename, audio_data, self._rate, subtype='PCM_16')
-            
+
+            duration_sec = len(frames) * self._chunk / self._rate
+            with self._save_lock:
+                self._total_duration_sec += duration_sec
+
+            s3_object_key: Optional[str] = None
+            s3_uploaded = False
+            if self._uploader:
+                try:
+                    s3_object_key = self._uploader.upload_file(
+                        local_path=filename,
+                        session_id=self._session_id,
+                        conversation_id=self._conversation_id,
+                    )
+                    s3_uploaded = True
+                    logger.info(f'Uploaded to S3: s3://{self._uploader.bucket}/{s3_object_key}')
+                except Exception as error:
+                    logger.warning(f'Upload failed for {filename}: {error}')
+
+            if self._recording_logger is not None:
+                self._recording_logger.write_chunk(
+                    session_id=self._session_id,
+                    chunk_index=count,
+                    file_path=filename,
+                    started_at=chunk_started_at,
+                    duration_sec=duration_sec,
+                    s3_object_key=s3_object_key,
+                    s3_uploaded=s3_uploaded,
+                )
+
             logger.info(f'Saved: {filename} ({len(frames)} frames)')
         except Exception as e:
             logger.error(f'Error saving {filename}: {e}')

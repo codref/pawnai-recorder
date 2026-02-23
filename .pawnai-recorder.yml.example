@@ -1,0 +1,43 @@
+# PawnAI Recorder configuration example
+
+recording:
+  rate: 16000
+  chunk: 16000
+  channel: 1
+  chunk_size: 120
+  file_extension: "flac"
+  output_dir: "audio/"
+  sample_width: 2
+
+  # Timestamp / filename formatting
+  # Placeholders available in timestamp_format:
+  #   {ts}        - datetime string shaped by datetime_format (strftime)
+  #   {device_id} - numeric audio device ID, or 'default' when not set
+  #
+  # Examples:
+  #   "{ts}"                  -> 231015143022_01.flac          (default)
+  #   "{ts}_dev{device_id}"   -> 231015143022_dev3_01.flac
+  #   "{device_id}/{ts}"      -> would require output_dir to exist per device
+  timestamp_format: "{ts}"
+  datetime_format: "%y%m%d%H%M%S"
+
+s3:
+  bucket: "your-bucket-name"
+  endpoint_url: "https://your-s3-compatible-endpoint"
+  access_key: "your-access-key"
+  secret_key: "your-secret-key"
+
+  # Optional settings
+  region: "us-east-1"
+  prefix: "conversations"
+  verify_ssl: true
+  path_style: true
+
+log:
+  # Local JSONL recording log
+  # The log file is created inside output_dir.
+  # Each completed recording session appends three record types:
+  #   session (event=start) - device, sample_rate, format, conversation_id
+  #   chunk                 - file_path, duration_sec, s3_object_key, s3_uploaded
+  #   session (event=end)   - total_duration_sec, chunk_count
+  file: "recordings.jsonl"
