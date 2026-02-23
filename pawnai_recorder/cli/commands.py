@@ -10,13 +10,15 @@ from typing import Optional
 
 import numpy as np
 import typer
-from blessed import Terminal
 from loguru import logger
+from rich.live import Live
+from rich.panel import Panel
+from rich.prompt import IntPrompt
+from rich.table import Table
 
 from pawnai_recorder.core import (
     MicrophoneStream,
     RecordingEngine,
-    draw_db_bar,
 )
 from pawnai_recorder.core.s3_upload import S3Uploader
 from pawnai_recorder.core.config import (
@@ -24,7 +26,7 @@ from pawnai_recorder.core.config import (
     TIMESTAMP_FORMAT, DATETIME_FORMAT,
 )
 from pawnai_recorder.core.log import RecordingLogger
-from pawnai_recorder.cli.utils import console, suppress_stderr
+from pawnai_recorder.cli.utils import console, suppress_stderr, make_device_table, make_level_progress, make_monitor_progress
 
 app = typer.Typer(help="Professional audio recording and management CLI")
 
@@ -35,9 +37,6 @@ default_chunk_size = int(app_config.get("chunk_size", RECORDING_CHUNK_SIZE))
 default_file_extension = str(app_config.get("file_extension", FILE_EXTENSION))
 default_timestamp_format = str(app_config.get("timestamp_format", TIMESTAMP_FORMAT))
 default_datetime_format = str(app_config.get("datetime_format", DATETIME_FORMAT))
-
-# Terminal UI
-term = Terminal()
 
 
 @app.command()
@@ -51,10 +50,15 @@ def list_devices(
 ):
     """List all available input audio devices."""
     if verbose:
-        RecordingEngine.list_devices(driver_filter=driver)
+        devices = RecordingEngine.list_devices(driver_filter=driver)
     else:
         with suppress_stderr():
-            RecordingEngine.list_devices(driver_filter=driver)
+            devices = RecordingEngine.list_devices(driver_filter=driver)
+
+    title = "Available Input Devices"
+    if driver:
+        title += f" (filtered by: {driver})"
+    console.print(Panel(make_device_table(devices), title=f"[bold]{title}[/bold]"))
 
 
 @app.command()
@@ -128,17 +132,24 @@ def record(
     # List devices and get user selection if not specified
     if device_id is None:
         if verbose:
-            input_devices = RecordingEngine.list_devices(driver_filter=driver)
+            devices = RecordingEngine.list_devices(driver_filter=driver)
         else:
             with suppress_stderr():
-                input_devices = RecordingEngine.list_devices(driver_filter=driver)
-        if not input_devices:
+                devices = RecordingEngine.list_devices(driver_filter=driver)
+        if not devices:
             console.print(
-                f"[error]✗ No input devices found"
+                "[error]✗ No input devices found"
                 + (f" for driver: {driver}" if driver else "")
                 + "[/error]"
             )
             sys.exit(1)
+
+        title = "Available Input Devices"
+        if driver:
+            title += f" (filtered by: {driver})"
+        console.print(Panel(make_device_table(devices), title=f"[bold]{title}[/bold]"))
+
+        input_device_ids = [d['id'] for d in devices]
         try:
             import pyaudio
 
@@ -148,15 +159,16 @@ def record(
                 with suppress_stderr():
                     audio = pyaudio.PyAudio()
             default_device = audio.get_default_input_device_info()
-            # Try to find default device in filtered list
             default_device_id = int(default_device['index']) if default_device else -1
-            if default_device_id not in input_devices:
-                default_device_id = input_devices[0] if input_devices else 0
+            if default_device_id not in input_device_ids:
+                default_device_id = input_device_ids[0] if input_device_ids else 0
             audio.terminate()
-            device_id = int(
-                input("📍 Select device ID (or press Enter for default): ") or default_device_id
+            device_id = IntPrompt.ask(
+                "📍 Select device ID",
+                console=console,
+                default=default_device_id,
             )
-            if device_id not in input_devices:
+            if device_id not in input_device_ids:
                 console.print(f"[error]✗ Invalid device ID: {device_id}[/error]")
                 sys.exit(1)
         except ValueError:
@@ -195,45 +207,52 @@ def record(
             recording_logger=recording_logger,
         )
         if verbose:
-            stream.start_recording()
+            session_info = stream.start_recording()
         else:
             with suppress_stderr():
-                stream.start_recording()
+                session_info = stream.start_recording()
 
-        if upload:
-            console.print("[info]☁️ Upload mode: enabled (use --no-upload to bypass)[/info]")
-        else:
-            console.print("[warning]☁️ Upload mode: bypassed for this run[/warning]")
+        # Build and display session summary Panel
+        upload_str = "[green]enabled[/green]" if upload else "[yellow]bypassed (--no-upload)[/yellow]"
+        gain_str = f"{gain:.2f}x"
+        if gain != 1.0 and gain > 0:
+            gain_str += f" ({20 * np.log10(gain):+.1f} dB)"
+        duration_str = f"{duration}s" if duration else "continuous — Ctrl+C to stop"
 
+        info_grid = Table.grid(padding=(0, 1))
+        info_grid.add_column(style="dim", justify="right")
+        info_grid.add_column()
+        info_grid.add_row("Session ID:", session_info['session_id'])
+        info_grid.add_row("Device:", f"{session_info['device_name']} (ID: {session_info['device_id']})")
+        info_grid.add_row("Sample Rate:", f"{session_info['sample_rate']} Hz")
+        info_grid.add_row("Format:", format.upper())
         if gain != 1.0:
-            db_gain = 20 * np.log10(gain) if gain > 0 else 0
-            console.print(f"[info]📊 Input gain: {gain:.2f}x ({db_gain:+.1f} dB)[/info]")
-
-        console.print(f"[info]🎵 Audio format: {format.upper()}[/info]")
+            info_grid.add_row("Gain:", gain_str)
+        info_grid.add_row("Upload:", upload_str)
+        info_grid.add_row("Duration:", duration_str)
+        info_grid.add_row("Output:", session_info['output_dir'])
+        info_grid.add_row("Log:", str(_log_path))
+        console.print(Panel(info_grid, title="[bold]🎙 Recording Session[/bold]", border_style="green"))
 
         if duration:
-            console.print(f"[info]⏱ Recording for {duration} seconds...[/info]")
             start_time = time.time()
-            while time.time() - start_time < duration:
-                db_level = stream.get_current_db_level()
-                bar = draw_db_bar(db_level, width=50)
-                sys.stdout.write(f"\r📈 Audio Level: {bar}")
-                sys.stdout.flush()
-                time.sleep(0.1)
-            print()  # New line after progress
+            with make_level_progress() as progress:
+                task = progress.add_task("level", total=120, db_text="-- dB")
+                while time.time() - start_time < duration:
+                    db_level = stream.get_current_db_level()
+                    progress.update(task, completed=db_level, db_text=f"{db_level:.1f} dB")
+                    time.sleep(0.1)
             stream.stop_recording()
-            # Wait for background threads to finish saving
             time.sleep(1.5)
             console.print("[success]✓ Recording completed[/success]")
         else:
-            console.print("[success]✓ Recording continuously... Press Ctrl+C to stop[/success]")
-            print(term.bold_underline("\n📊 Real-time dB Level Meter (Press Ctrl+C to stop)\n"))
-            while True:
-                db_level = stream.get_current_db_level()
-                bar = draw_db_bar(db_level, width=50)
-                sys.stdout.write(f"\r📈 Audio Level: {bar}")
-                sys.stdout.flush()
-                time.sleep(0.1)
+            console.rule("[bold]Real-time dB Level Meter[/bold] — Ctrl+C to stop")
+            with make_level_progress() as progress:
+                task = progress.add_task("level", total=120, db_text="-- dB")
+                while True:
+                    db_level = stream.get_current_db_level()
+                    progress.update(task, completed=db_level, db_text=f"{db_level:.1f} dB")
+                    time.sleep(0.1)
 
     except KeyboardInterrupt:
         console.print("[warning]⏹ Recording interrupted by user[/warning]")
@@ -295,25 +314,29 @@ def monitor(
     device_names = {}
     streams = {}
     available_devices = []
-    
+
+    def _try_open(did):
+        """Open a test stream, suppressing C-level ALSA/PA stderr when not verbose."""
+        if verbose:
+            return audio.open(
+                format=pyaudio.paInt16, channels=1, rate=rate, input=True,
+                input_device_index=did, frames_per_buffer=chunk_size, stream_callback=None,
+            )
+        with suppress_stderr():
+            return audio.open(
+                format=pyaudio.paInt16, channels=1, rate=rate, input=True,
+                input_device_index=did, frames_per_buffer=chunk_size, stream_callback=None,
+            )
+
     try:
-        for device_id in all_input_devices:
+        for dev in all_input_devices:
+            did = dev['id']
             try:
-                device_info = audio.get_device_info_by_index(device_id)
-                device_names[device_id] = device_info.get('name', f'Device {device_id}')
-                
                 # Test if we can open stream for this device
-                test_stream = audio.open(
-                    format=pyaudio.paInt16,
-                    channels=1,
-                    rate=rate,
-                    input=True,
-                    input_device_index=device_id,
-                    frames_per_buffer=chunk_size,
-                    stream_callback=None,
-                )
+                test_stream = _try_open(did)
                 test_stream.close()
-                available_devices.append(device_id)
+                device_names[did] = dev['name']
+                available_devices.append(did)
             except Exception:
                 # Device is unavailable, skip it silently
                 pass
@@ -324,71 +347,71 @@ def monitor(
         
         console.print(f"\n[success]✓ Monitoring {len(available_devices)} device(s)[/success]")
         console.print("[info]Press Ctrl+C to stop monitoring[/info]\n")
-        
+
         # Now open streams for available devices
         for device_id in available_devices:
             try:
-                stream = audio.open(
-                    format=pyaudio.paInt16,
-                    channels=1,
-                    rate=rate,
-                    input=True,
-                    input_device_index=device_id,
-                    frames_per_buffer=chunk_size,
-                    stream_callback=None,
-                )
-                streams[device_id] = stream
+                streams[device_id] = _try_open(device_id)
             except Exception:
                 # Skip if stream opening fails
                 pass
-        
+
         # Dictionary to store current dB levels
         device_levels = {device_id: 0.0 for device_id in available_devices}
         start_time = time.time()
-        
-        # Monitoring loop
-        while True:
-            # Check duration
-            if duration and (time.time() - start_time) > duration:
-                break
-            
-            # Update levels from available streams
-            for device_id, stream in streams.items():
-                try:
-                    if stream.is_active():
-                        data = stream.read(chunk_size, exception_on_overflow=False)
-                        import numpy as np
-                        audio_array = np.frombuffer(data, dtype=np.int16)
-                        rms = np.sqrt(np.mean(audio_array.astype(float) ** 2))
-                        max_int16 = 32768
-                        if rms > 0:
-                            db = 20 * np.log10(rms / max_int16)
-                            db = max(0, min(120, db + 120))
-                        else:
-                            db = 0
-                        device_levels[device_id] = db
-                except Exception:
-                    # Silently skip read errors
-                    pass
-            
-            # Display levels for all devices
-            print("\033[H\033[J", end="", flush=True)  # Clear screen
-            console.print("[bold cyan]📊 Audio Device Monitor[/bold cyan]")
-            console.print("-" * 80)
-            
-            # Find device with highest activity
-            max_device = max(device_levels, key=device_levels.get)
-            max_level = max(device_levels.values())
-            
-            for device_id in sorted(available_devices):
-                db_level = device_levels[device_id]
-                bar = draw_db_bar(db_level, width=40)
-                is_active = " 🎤 [bold green]ACTIVE[/bold green]" if device_id == max_device and max_level > 10 else ""
-                console.print(f"[{device_id}] {device_names[device_id]:<35} {bar}{is_active}")
-            
-            console.print("-" * 80)
-            console.print("[dim]Ctrl+C to stop | Highest activity device marked ACTIVE[/dim]")
-            time.sleep(interval)
+
+        # Build one Progress task per device
+        progress = make_monitor_progress()
+        tasks = {}
+        for did in sorted(available_devices):
+            tasks[did] = progress.add_task(
+                f"[cyan][{did}][/cyan] {device_names[did]}",
+                total=120,
+                db_text="-- dB",
+                status="",
+            )
+
+        live_panel = Panel(
+            progress,
+            title="[bold cyan]📊 Audio Device Monitor[/bold cyan]",
+            subtitle="[dim]Ctrl+C to stop | Highest-activity device marked ACTIVE[/dim]",
+        )
+
+        # Monitoring loop with Rich Live display
+        with Live(live_panel, console=console, refresh_per_second=5, screen=False):
+            while True:
+                if duration and (time.time() - start_time) > duration:
+                    break
+
+                # Update levels from available streams
+                for device_id, stream in streams.items():
+                    try:
+                        if stream.is_active():
+                            data = stream.read(chunk_size, exception_on_overflow=False)
+                            audio_array = np.frombuffer(data, dtype=np.int16)
+                            rms = np.sqrt(np.mean(audio_array.astype(float) ** 2))
+                            if rms > 0:
+                                db = 20 * np.log10(rms / 32768)
+                                db = max(0, min(120, db + 120))
+                            else:
+                                db = 0
+                            device_levels[device_id] = db
+                    except Exception:
+                        pass
+
+                if device_levels:
+                    max_device = max(device_levels, key=device_levels.get)
+                    max_level = max(device_levels.values())
+                else:
+                    max_device = -1
+                    max_level = 0
+
+                for did in sorted(available_devices):
+                    db_level = device_levels.get(did, 0.0)
+                    status_str = "🎤 [bold green]ACTIVE[/bold green]" if did == max_device and max_level > 10 else ""
+                    progress.update(tasks[did], completed=db_level, db_text=f"{db_level:.1f} dB", status=status_str)
+
+                time.sleep(interval)
     
     except KeyboardInterrupt:
         console.print("\n[warning]⏹ Monitoring stopped by user[/warning]")
@@ -422,15 +445,15 @@ def status(
     else:
         logger.add(sys.stderr, level="WARNING")
 
-    console.print("[bold]📋 PawnAI Recorder Status[/bold]")
+    console.rule("[bold]📋 PawnAI Recorder Status[/bold]")
     console.print()
-    console.print("[info]Available Input Devices:[/info]")
     try:
         if verbose:
-            RecordingEngine.list_devices()
+            devices = RecordingEngine.list_devices()
         else:
             with suppress_stderr():
-                RecordingEngine.list_devices()
+                devices = RecordingEngine.list_devices()
+        console.print(Panel(make_device_table(devices), title="[bold]Available Input Devices[/bold]"))
     except Exception as e:
         console.print(f"[error]✗ Error listing devices: {e}[/error]")
 

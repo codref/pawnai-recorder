@@ -31,7 +31,6 @@ dependencies = [
     "loguru>=0.7.2",
     "typer[all]>=0.9.0",
     "rich>=13.0.0",
-    "blessed>=1.20.0",
     "numpy>=1.21.0",
     "soundfile>=0.12.1",
     "scipy>=1.7.0",

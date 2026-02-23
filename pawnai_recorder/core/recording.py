@@ -92,7 +92,7 @@ class RecordingEngine:
             driver_filter: Optional driver type to filter by ('pulse', 'alsa', 'jack', 'usb', 'default')
 
         Returns:
-            List of device IDs that are input devices
+            List of dicts with keys: id, name, driver, channels, rate, is_default
         """
         from .processing import detect_driver_type
 
@@ -101,10 +101,7 @@ class RecordingEngine:
         default_device = audio.get_default_input_device_info()
         default_device_id = int(default_device['index']) if default_device else -1
 
-        filter_text = f" (filtered by: {driver_filter})" if driver_filter else ""
-        print(f"\nAvailable input devices{filter_text}:")
-        print("-" * 80)
-        input_devices = []
+        devices = []
 
         for i in range(device_count):
             device_info = audio.get_device_info_by_index(i)
@@ -116,16 +113,19 @@ class RecordingEngine:
                 if driver_filter and driver_type != driver_filter.lower():
                     continue
 
-                input_devices.append(i)
                 channels = device_info.get('maxInputChannels', 0)
                 sample_rate = int(device_info.get('defaultSampleRate', 0))
-                default = " [DEFAULT]" if i == default_device_id else ""
-                print(f"{i}: {device_name}")
-                print(f"   Driver: {driver_type.upper()} | Channels: {channels} | Sample Rate: {sample_rate} Hz{default}")
+                devices.append({
+                    'id': i,
+                    'name': device_name,
+                    'driver': driver_type,
+                    'channels': channels,
+                    'rate': sample_rate,
+                    'is_default': (i == default_device_id),
+                })
 
         audio.terminate()
-        print("-" * 80 + "\n")
-        return input_devices
+        return devices
 
 
 class MicrophoneStream:
@@ -271,6 +271,7 @@ class MicrophoneStream:
         self._rate = device_sample_rate
         self._session_started_at = datetime.datetime.now()
 
+        self._device_name = device_name
         self._audio_stream = self._audio_interface.open(
             format=self._sample_width,
             channels=self._channel,
@@ -280,11 +281,6 @@ class MicrophoneStream:
             frames_per_buffer=self._chunk,
             stream_callback=self._fill_buffer,
         )
-        from pawnai_recorder.cli.utils import console
-        console.print(f'[info]🎙 Recording started. Session ID: {self._session_id}[/info]')
-        console.print(f'[info]🎙 Device: {device_name} (ID: {self._device_id})[/info]')
-        console.print(f'[info]🎙 Sample Rate: {self._rate} Hz[/info]')
-        console.print(f'[info]🎙 Output directory: {self._output_dir}[/info]')
 
         if self._recording_logger is not None:
             self._recording_logger.write_session_start(
@@ -297,6 +293,14 @@ class MicrophoneStream:
                 format=self._file_format,
                 started_at=self._session_started_at,
             )
+
+        return {
+            'session_id': self._session_id,
+            'device_name': device_name,
+            'device_id': self._device_id,
+            'sample_rate': self._rate,
+            'output_dir': self._output_dir,
+        }
 
     def stop_recording(self) -> None:
         """Close the recording stream and save any remaining frames."""
