@@ -85,46 +85,70 @@ class RecordingEngine:
     """Real-time audio recording engine with device and format support."""
 
     @staticmethod
-    def list_devices(driver_filter: Optional[str] = None) -> list:
+    def list_devices(
+        driver_filter: Optional[str] = None,
+        audio: Optional["pyaudio.PyAudio"] = None,
+    ) -> list:
         """List all available input audio devices.
 
         Args:
             driver_filter: Optional driver type to filter by ('pulse', 'alsa', 'jack', 'usb', 'default')
+            audio: Optional existing PyAudio instance to reuse.  When provided the
+                caller is responsible for calling ``audio.terminate()``; when
+                omitted a temporary instance is created and terminated internally.
+                Reusing an instance across enumeration **and** stream opening is
+                important on PulseAudio systems — multiple rapid init/terminate
+                cycles can cause PortAudio to enumerate stale ALSA virtual
+                devices that have no real audio signal.
 
         Returns:
             List of dicts with keys: id, name, driver, channels, rate, is_default
         """
         from .processing import detect_driver_type
 
-        audio = pyaudio.PyAudio()
-        device_count = audio.get_device_count()
-        default_device = audio.get_default_input_device_info()
-        default_device_id = int(default_device['index']) if default_device else -1
+        _owns_audio = audio is None
+        if _owns_audio:
+            audio = pyaudio.PyAudio()
+        try:
+            device_count = audio.get_device_count()
+            try:
+                default_device = audio.get_default_input_device_info()
+                default_device_id = int(default_device['index'])
+            except OSError:
+                # No default input device registered yet (e.g. PulseAudio still
+                # enumerating on first PortAudio init).  Continue without marking
+                # any device as default so the caller still gets the full list.
+                default_device_id = -1
 
-        devices = []
+            devices = []
 
-        for i in range(device_count):
-            device_info = audio.get_device_info_by_index(i)
-            if device_info.get('maxInputChannels', 0) > 0:
-                device_name = device_info.get('name', 'Unknown')
-                driver_type = detect_driver_type(device_name)
-
-                # Skip if driver filter is specified and doesn't match
-                if driver_filter and driver_type != driver_filter.lower():
+            for i in range(device_count):
+                try:
+                    device_info = audio.get_device_info_by_index(i)
+                except OSError:
                     continue
+                if device_info.get('maxInputChannels', 0) > 0:
+                    device_name = device_info.get('name', 'Unknown')
+                    driver_type = detect_driver_type(device_name)
 
-                channels = device_info.get('maxInputChannels', 0)
-                sample_rate = int(device_info.get('defaultSampleRate', 0))
-                devices.append({
-                    'id': i,
-                    'name': device_name,
-                    'driver': driver_type,
-                    'channels': channels,
-                    'rate': sample_rate,
-                    'is_default': (i == default_device_id),
-                })
+                    # Skip if driver filter is specified and doesn't match
+                    if driver_filter and driver_type != driver_filter.lower():
+                        continue
 
-        audio.terminate()
+                    channels = device_info.get('maxInputChannels', 0)
+                    sample_rate = int(device_info.get('defaultSampleRate', 0))
+                    devices.append({
+                        'id': i,
+                        'name': device_name,
+                        'driver': driver_type,
+                        'channels': channels,
+                        'rate': sample_rate,
+                        'is_default': (i == default_device_id),
+                    })
+        finally:
+            if _owns_audio:
+                audio.terminate()
+
         return devices
 
 

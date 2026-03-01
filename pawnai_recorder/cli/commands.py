@@ -294,23 +294,30 @@ def monitor(
         logger.add(sys.stderr, level="WARNING")
 
     import pyaudio
-    
-    # Get list of all input devices
-    if verbose:
-        all_input_devices = RecordingEngine.list_devices()
-    else:
-        with suppress_stderr():
-            all_input_devices = RecordingEngine.list_devices()
-    if not all_input_devices:
-        console.print("[error]✗ No input devices found[/error]")
-        sys.exit(1)
-    
-    # Test each device and filter out unavailable ones
+
+    # Create a single PyAudio instance shared across enumeration AND stream
+    # opening.  Multiple rapid init/terminate cycles confuse PortAudio's
+    # PulseAudio backend: the first init returns stale ALSA virtual devices
+    # with no audio signal, while real PulseAudio devices only appear once the
+    # PA connection is fully established.  Reusing one instance avoids this.
     if verbose:
         audio = pyaudio.PyAudio()
     else:
         with suppress_stderr():
             audio = pyaudio.PyAudio()
+
+    # Get list of all input devices, reusing the same PyAudio instance
+    if verbose:
+        all_input_devices = RecordingEngine.list_devices(audio=audio)
+    else:
+        with suppress_stderr():
+            all_input_devices = RecordingEngine.list_devices(audio=audio)
+
+    if not all_input_devices:
+        audio.terminate()
+        console.print("[error]✗ No input devices found[/error]")
+        sys.exit(1)
+
     device_names = {}
     streams = {}
     available_devices = []
