@@ -3,6 +3,7 @@
 from .config import AppConfig
 from .log import RecordingLogger
 from .processing import apply_gain, calculate_db_level, detect_driver_type, draw_db_bar
+from .queue_producer import SessionQueueProducer
 from .recording import MicrophoneStream, RecordingEngine
 from .s3_upload import S3Uploader, build_object_key
 from .storage import StorageManager
@@ -13,6 +14,7 @@ __all__ = [
     "MicrophoneStream",
     "RecordingLogger",
     "S3Uploader",
+    "SessionQueueProducer",
     "StorageManager",
     "calculate_db_level",
     "draw_db_bar",

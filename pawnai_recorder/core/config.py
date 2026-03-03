@@ -165,6 +165,27 @@ class AppConfig:
             return s3_config
         return None
 
+    def get_queue_config(self) -> Optional[Dict[str, Any]]:
+        """Get queue producer configuration, if present.
+
+        Expects a ``queue:`` top-level key in ``.pawnai-recorder.yml`` with at
+        least a ``topic`` field and an optional ``enabled`` flag::
+
+            queue:
+              enabled: true
+              topic: audio-chunks
+
+        S3 credentials are taken from the ``s3:`` section automatically.
+
+        Returns:
+            Dict with at minimum ``topic`` and ``enabled`` keys, or ``None``
+            when the section is absent.
+        """
+        queue_config = self._config.get('queue')
+        if isinstance(queue_config, dict):
+            return queue_config
+        return None
+
     def get_log_path(self, output_dir: Optional['Path'] = None) -> 'Path':
         """Return the recording log file path.
 

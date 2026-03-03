@@ -78,6 +78,7 @@ from .config import (
 from .processing import apply_gain, calculate_db_level
 from .config import AppConfig
 from .log import RecordingLogger
+from .queue_producer import SessionQueueProducer
 from .s3_upload import S3Uploader
 
 
@@ -225,6 +226,7 @@ class MicrophoneStream:
         timestamp_format: str = TIMESTAMP_FORMAT,
         datetime_format: str = DATETIME_FORMAT,
         recording_logger: Optional[RecordingLogger] = None,
+        queue_producer: Optional[SessionQueueProducer] = None,
     ) -> None:
         """Initialize the microphone stream.
 
@@ -287,6 +289,7 @@ class MicrophoneStream:
 
         # Recording logger and session tracking
         self._recording_logger = recording_logger
+        self._queue_producer = queue_producer
         self._session_started_at: Optional[datetime.datetime] = None
         self._total_duration_sec: float = 0.0
         self._save_lock = threading.Lock()
@@ -515,6 +518,13 @@ class MicrophoneStream:
                     )
                     s3_uploaded = True
                     logger.info(f'Uploaded to S3: s3://{self._uploader.bucket}/{s3_object_key}')
+                    if self._queue_producer is not None:
+                        self._queue_producer.publish(
+                            session_id=self._session_id,
+                            chunk_index=count,
+                            s3_key=s3_object_key,
+                            conversation_id=self._conversation_id,
+                        )
                 except Exception as error:
                     logger.warning(f'Upload failed for {filename}: {error}')
 

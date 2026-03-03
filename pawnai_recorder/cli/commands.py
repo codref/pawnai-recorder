@@ -22,6 +22,7 @@ from pawnai_recorder.core import (
     MicrophoneStream,
     RecordingEngine,
 )
+from pawnai_recorder.core.queue_producer import SessionQueueProducer
 from pawnai_recorder.core.s3_upload import S3Uploader
 from pawnai_recorder.core.config import (
     AppConfig, RATE, RECORDING_CHUNK_SIZE, FILE_EXTENSION, CHUNK_DIR,
@@ -162,6 +163,25 @@ def record(
     console.print(f'[dim]📝 Recording log: {_log_path}[/dim]')
 
     # ------------------------------------------------------------------
+    # Initialise optional PawnQueue producer (shared by both recording paths)
+    # ------------------------------------------------------------------
+    _queue_producer: Optional[SessionQueueProducer] = None
+    _queue_cfg = app_config.get_queue_config()
+    if _queue_cfg and _queue_cfg.get('enabled', True) and _queue_cfg.get('topic'):
+        _s3_cfg_for_queue = app_config.get_s3_config()
+        if _s3_cfg_for_queue:
+            try:
+                _queue_producer = SessionQueueProducer(
+                    s3_config=_s3_cfg_for_queue,
+                    topic=str(_queue_cfg['topic']),
+                )
+                console.print(f"[dim]🔔 Queue producer ready: topic={_queue_cfg['topic']!r}[/dim]")
+            except Exception as _qe:
+                console.print(f"[warning]PawnQueue init failed: {_qe} — publishing disabled[/warning]")
+        else:
+            console.print('[dim]PawnQueue: no S3 config — publishing disabled[/dim]')
+
+    # ------------------------------------------------------------------
     # OUTPUT SINK path: capture via parec <sink>.monitor
     # ------------------------------------------------------------------
     if sink is not None:
@@ -278,6 +298,13 @@ def record(
                     )
                     s3_ok = True
                     console.print(f"[dim]⬆  Uploaded chunk {idx}: {s3_key}[/dim]")
+                    if _queue_producer is not None:
+                        _queue_producer.publish(
+                            session_id=session_id,
+                            chunk_index=idx,
+                            s3_key=s3_key,
+                            conversation_id=conversation_id,
+                        )
                 except Exception as _ue:
                     console.print(f"[warning]Upload failed for chunk {idx}: {_ue}[/warning]")
 
@@ -339,6 +366,8 @@ def record(
         console.print(
             f"[success]✓ Recorded {_total_frames / rate:.1f} s in {_chunk_count} chunk(s)[/success]"
         )
+        if _queue_producer is not None:
+            _queue_producer.close()
         return
 
     # ------------------------------------------------------------------
@@ -420,6 +449,7 @@ def record(
             timestamp_format=timestamp_format,
             datetime_format=datetime_format,
             recording_logger=recording_logger,
+            queue_producer=_queue_producer,
         )
         if verbose:
             session_info = stream.start_recording()
@@ -482,6 +512,9 @@ def record(
             # Wait for background threads to finish saving
             time.sleep(1.5)
         sys.exit(1)
+    finally:
+        if _queue_producer is not None:
+            _queue_producer.close()
 
 
 @app.command()
