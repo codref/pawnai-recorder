@@ -85,6 +85,58 @@ class RecordingEngine:
     """Real-time audio recording engine with device and format support."""
 
     @staticmethod
+    def list_output_devices() -> list:
+        """List available PulseAudio/PipeWire output sinks and their monitor sources.
+
+        Uses ``pactl list short sinks`` to enumerate sinks.  Each entry includes
+        the sink name and the corresponding ``.monitor`` source name that can be
+        passed to ``parec --device=<monitor>`` for loopback capture.
+
+        Returns:
+            List of dicts with keys: name, monitor, description, state.
+            Returns an empty list if ``pactl`` is unavailable or fails.
+        """
+        try:
+            result = subprocess.run(
+                ["pactl", "list", "short", "sinks"],
+                capture_output=True, text=True, timeout=3,
+            )
+            sinks = []
+            for line in result.stdout.splitlines():
+                parts = line.split("\t")
+                if len(parts) >= 2:
+                    sink_name = parts[1].strip()
+                    state = parts[4].strip() if len(parts) >= 5 else "UNKNOWN"
+                    sinks.append({
+                        "name": sink_name,
+                        "monitor": f"{sink_name}.monitor",
+                        "description": sink_name,
+                        "state": state,
+                    })
+            # Also get human-readable descriptions
+            try:
+                desc_result = subprocess.run(
+                    ["pactl", "list", "sinks"],
+                    capture_output=True, text=True, timeout=3,
+                )
+                current_name = None
+                desc_map: dict = {}
+                for line in desc_result.stdout.splitlines():
+                    line_stripped = line.strip()
+                    if line_stripped.startswith("Name:"):
+                        current_name = line_stripped.split(":", 1)[1].strip()
+                    elif line_stripped.startswith("Description:") and current_name:
+                        desc_map[current_name] = line_stripped.split(":", 1)[1].strip()
+                for sink in sinks:
+                    if sink["name"] in desc_map:
+                        sink["description"] = desc_map[sink["name"]]
+            except Exception:
+                pass
+            return sinks
+        except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+            return []
+
+    @staticmethod
     def list_devices(
         driver_filter: Optional[str] = None,
         audio: Optional["pyaudio.PyAudio"] = None,
@@ -136,12 +188,14 @@ class RecordingEngine:
                         continue
 
                     channels = device_info.get('maxInputChannels', 0)
+                    output_channels = device_info.get('maxOutputChannels', 0)
                     sample_rate = int(device_info.get('defaultSampleRate', 0))
                     devices.append({
                         'id': i,
                         'name': device_name,
                         'driver': driver_type,
                         'channels': channels,
+                        'output_channels': output_channels,
                         'rate': sample_rate,
                         'is_default': (i == default_device_id),
                     })

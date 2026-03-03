@@ -42,7 +42,8 @@ def make_device_table(devices: List[dict]) -> Table:
     table.add_column("ID", style="cyan", width=4, justify="right")
     table.add_column("Name", min_width=30)
     table.add_column("Driver", style="dim", width=8)
-    table.add_column("Ch", justify="right", style="dim", width=4)
+    table.add_column("In Ch", justify="right", style="dim", width=6)
+    table.add_column("Out Ch", justify="right", style="dim", width=7)
     table.add_column("Rate", justify="right", style="dim", width=12)
     table.add_column("", width=9)
 
@@ -53,6 +54,7 @@ def make_device_table(devices: List[dict]) -> Table:
             d["name"],
             d.get("driver", "").upper(),
             str(d.get("channels", "")),
+            str(d.get("output_channels", "")),
             f"{d.get('rate', '')} Hz",
             default_mark,
         )
@@ -135,4 +137,29 @@ def suppress_stderr():
         os.close(original_stderr_fd)
 
 
-__all__ = ["console", "suppress_stderr", "make_device_table", "make_level_progress", "make_monitor_progress"]
+
+def make_sinks_table(sinks: List[dict]) -> Table:
+    """Build a Rich Table from the list returned by RecordingEngine.list_output_devices().
+
+    Args:
+        sinks: List of dicts with keys: name, monitor, description, state
+
+    Returns:
+        Configured Rich Table ready to print.
+    """
+    table = Table(show_header=True, header_style="bold", show_lines=False, expand=False)
+    table.add_column("Monitor Source", min_width=36)
+    table.add_column("Description", min_width=30)
+    table.add_column("State", width=10)
+
+    for s in sinks:
+        state_style = "green" if s.get("state") == "RUNNING" else "dim"
+        table.add_row(
+            s["monitor"],
+            s.get("description", ""),
+            f"[{state_style}]{s.get('state', '')}[/{state_style}]",
+        )
+    return table
+
+
+__all__ = ["console", "suppress_stderr", "make_device_table", "make_level_progress", "make_monitor_progress", "make_sinks_table"]

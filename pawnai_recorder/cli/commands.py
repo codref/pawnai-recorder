@@ -3,7 +3,9 @@
 This module provides all command-line interface commands using Typer.
 """
 
+import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -26,7 +28,7 @@ from pawnai_recorder.core.config import (
     TIMESTAMP_FORMAT, DATETIME_FORMAT,
 )
 from pawnai_recorder.core.log import RecordingLogger
-from pawnai_recorder.cli.utils import console, suppress_stderr, make_device_table, make_level_progress, make_monitor_progress
+from pawnai_recorder.cli.utils import console, suppress_stderr, make_device_table, make_level_progress, make_monitor_progress, make_sinks_table
 
 app = typer.Typer(help="Professional audio recording and management CLI")
 
@@ -62,6 +64,28 @@ def list_devices(
 
 
 @app.command()
+def list_sinks(
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Show debug output"
+    ),
+):
+    """List available output (speaker) sinks that can be recorded via their monitor source.
+
+    Use the value in the 'Monitor Source' column as --sink when running the
+    record command to capture what is playing on that output device.
+    """
+    sinks = RecordingEngine.list_output_devices()
+    if not sinks:
+        console.print("[warning]No PulseAudio sinks found (is pactl installed?)[/warning]")
+        sys.exit(1)
+    console.print(Panel(
+        make_sinks_table(sinks),
+        title="[bold]Available Output Sinks[/bold]",
+        subtitle="[dim]Pass the Monitor Source value to: pawnai-recorder record --sink <monitor>[/dim]",
+    ))
+
+
+@app.command()
 def record(
     duration: Optional[int] = typer.Option(
         None, help="Recording duration in seconds. Leave empty for continuous recording."
@@ -71,6 +95,14 @@ def record(
     chunk_size: int = typer.Option(default_chunk_size, help="Frames per chunk"),
     device_id: Optional[int] = typer.Option(
         None, help="Audio device ID to use. Leave empty to select interactively."
+    ),
+    sink: Optional[str] = typer.Option(
+        None,
+        help=(
+            "PulseAudio monitor source to record from instead of a microphone. "
+            "Run 'list-sinks' to see available values (e.g. alsa_output.pci-...analog-stereo.monitor). "
+            "When set, --device-id is ignored."
+        ),
     ),
     driver: Optional[str] = typer.Option(
         None, help="Filter devices by driver: pulse, alsa, jack, usb, default"
@@ -129,6 +161,189 @@ def record(
     recording_logger = RecordingLogger(_log_path)
     console.print(f'[dim]📝 Recording log: {_log_path}[/dim]')
 
+    # ------------------------------------------------------------------
+    # OUTPUT SINK path: capture via parec <sink>.monitor
+    # ------------------------------------------------------------------
+    if sink is not None:
+        import datetime as _dt
+        import soundfile as sf
+
+        # Normalise: accept either "alsa_output.xxx" or "alsa_output.xxx.monitor"
+        monitor_source = sink if sink.endswith(".monitor") else f"{sink}.monitor"
+
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        # Session ID: apply the same timestamp_format template as the mic path
+        _now = _dt.datetime.now()
+        _ts_str = _now.strftime(datetime_format)
+        session_id = timestamp_format.format(ts=_ts_str, device_id="default")
+
+        # ------------------------------------------------------------------
+        # Initialise optional S3 uploader (same logic as MicrophoneStream)
+        # ------------------------------------------------------------------
+        _uploader = None
+        if upload:
+            try:
+                _s3_cfg = app_config.get_s3_config()
+                if _s3_cfg:
+                    _uploader = S3Uploader.from_dict(_s3_cfg)
+                else:
+                    console.print("[dim]S3 upload: no config in .pawnai-recorder.yml — skipping[/dim]")
+            except Exception as _e:
+                console.print(f"[warning]S3 init failed: {_e}[/warning]")
+
+        # Each parec read is exactly one second of audio at the requested rate.
+        # We accumulate chunk_size reads before closing the file — identical semantics
+        # to the microphone path where chunk_size counts PyAudio callbacks.
+        _read_bytes = rate * 2  # s16le → 2 bytes per sample; 1 second per read
+        _read_buf: list = []    # accumulated np.int16 arrays for current chunk
+        _read_count = 0          # reads accumulated so far
+        _chunk_count = 0
+        _total_frames = 0
+        _chunk_started_at = _now
+        _start_time = time.time()
+
+        # Each read = 1 s, so chunk_size reads = chunk_size seconds per file
+        _chunk_sec = chunk_size
+
+        gain_str = f"{gain:.2f}x"
+        if gain != 1.0:
+            gain_str += f" ({20 * np.log10(gain):+.1f} dB)"
+        upload_str = "[green]enabled[/green]" if _uploader else "[yellow]disabled[/yellow]"
+
+        console.print(Panel(
+            f"[dim]Monitor:[/dim]    {monitor_source}\n"
+            f"[dim]Session:[/dim]    {session_id}\n"
+            f"[dim]Rate:[/dim]       {rate} Hz  |  [dim]Format:[/dim] {format.upper()}\n"
+            f"[dim]Chunk size:[/dim] {chunk_size} reads ≈ {_chunk_sec:.0f} s/file\n"
+            f"[dim]Gain:[/dim]       {gain_str}\n"
+            f"[dim]Upload:[/dim]     {upload_str}\n"
+            f"[dim]Duration:[/dim]   {f'{duration}s' if duration else 'continuous — Ctrl+C to stop'}",
+            title="[bold]🔊 Recording Output Sink[/bold]",
+            border_style="magenta",
+        ))
+
+        parec_cmd = [
+            "parec",
+            f"--device={monitor_source}",
+            "--format=s16le",
+            f"--rate={rate}",
+            "--channels=1",
+            "--latency-msec=50",
+        ]
+        try:
+            proc = subprocess.Popen(parec_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        except FileNotFoundError:
+            console.print("[error]✗ parec not found — install pulseaudio-utils[/error]")
+            sys.exit(1)
+
+        # Log session start
+        recording_logger.write_session_start(
+            session_id=session_id,
+            conversation_id=conversation_id,
+            device_id=None,
+            device_name=monitor_source,
+            sample_rate=rate,
+            channels=1,
+            format=format,
+            started_at=_now,
+        )
+
+        def _flush_chunk(buf: list, idx: int, started_at: _dt.datetime) -> None:
+            """Save *buf* arrays to a chunk file, upload, and log."""
+            nonlocal _total_frames
+            if not buf:
+                return
+            chunk_file = output_path / f"{session_id}_{idx:02d}.{format}"
+            audio_arr = np.concatenate(buf)  # int16
+            if gain != 1.0:
+                audio_arr = np.clip(
+                    audio_arr.astype(np.float32) * gain, -32768, 32767
+                ).astype(np.int16)
+            audio_float = audio_arr.astype(np.float32) / 32768.0
+            sf.write(str(chunk_file), audio_float, rate, subtype="PCM_16")
+            dur_sec = len(audio_arr) / rate
+            _total_frames += len(audio_arr)
+
+            # S3 upload
+            s3_key: Optional[str] = None
+            s3_ok = False
+            if _uploader:
+                try:
+                    s3_key = _uploader.upload_file(
+                        local_path=str(chunk_file),
+                        session_id=session_id,
+                        conversation_id=conversation_id,
+                    )
+                    s3_ok = True
+                    console.print(f"[dim]⬆  Uploaded chunk {idx}: {s3_key}[/dim]")
+                except Exception as _ue:
+                    console.print(f"[warning]Upload failed for chunk {idx}: {_ue}[/warning]")
+
+            # JSONL log
+            recording_logger.write_chunk(
+                session_id=session_id,
+                chunk_index=idx,
+                file_path=str(chunk_file),
+                started_at=started_at,
+                duration_sec=dur_sec,
+                s3_object_key=s3_key,
+                s3_uploaded=s3_ok,
+            )
+            console.print(f"[dim]💾 Saved chunk {idx}: {chunk_file} ({dur_sec:.1f} s)[/dim]")
+
+        try:
+            with make_level_progress() as progress:
+                task = progress.add_task("level", total=120, db_text="-- dB")
+                while True:
+                    if duration and (time.time() - _start_time) >= duration:
+                        break
+                    data = proc.stdout.read(_read_bytes)
+                    if not data:
+                        break
+                    audio_chunk = np.frombuffer(data, dtype=np.int16).copy()
+                    _read_buf.append(audio_chunk)
+                    _read_count += 1
+
+                    # Level meter (on raw, pre-gain signal for display)
+                    rms = np.sqrt(np.mean(audio_chunk.astype(float) ** 2))
+                    db = max(0.0, min(120.0, 20 * np.log10(rms / 32768) + 120)) if rms > 0 else 0.0
+                    progress.update(task, completed=db, db_text=f"{db:.1f} dB")
+
+                    # Flush when we have accumulated chunk_size reads
+                    if _read_count >= chunk_size:
+                        _chunk_count += 1
+                        _flush_chunk(_read_buf[:], _chunk_count, _chunk_started_at)
+                        _read_buf = []
+                        _read_count = 0
+                        _chunk_started_at = _dt.datetime.now()
+
+        except KeyboardInterrupt:
+            console.print("\n[warning]⏹ Recording interrupted by user[/warning]")
+        finally:
+            proc.terminate()
+
+        # Save any remaining frames that did not fill a full chunk
+        if _read_buf:
+            _chunk_count += 1
+            _flush_chunk(_read_buf, _chunk_count, _chunk_started_at)
+
+        # Log session end
+        recording_logger.write_session_end(
+            session_id=session_id,
+            total_duration_sec=_total_frames / rate,
+            chunk_count=_chunk_count,
+        )
+
+        console.print(
+            f"[success]✓ Recorded {_total_frames / rate:.1f} s in {_chunk_count} chunk(s)[/success]"
+        )
+        return
+
+    # ------------------------------------------------------------------
+    # Normal INPUT (microphone) path
+    # ------------------------------------------------------------------
     # List devices and get user selection if not specified
     if device_id is None:
         if verbose:
@@ -277,13 +492,19 @@ def monitor(
     rate: int = typer.Option(default_rate, help="Sample rate in Hz"),
     chunk_size: int = typer.Option(default_chunk_size, help="Frames per chunk"),
     interval: float = typer.Option(0.2, help="Refresh interval in seconds (larger = less flicker)"),
+    include_output: bool = typer.Option(
+        True, "--include-output/--no-include-output",
+        help="Also monitor output (speaker) devices via PulseAudio monitor sources.",
+    ),
     verbose: bool = typer.Option(
         False, "--verbose", "-v", help="Show debug output from audio libraries"
     ),
 ):
     """Monitor all audio devices in real-time to identify which has audio.
-    
-    Shows live audio levels for all connected input devices.
+
+    Shows live audio levels for all connected input devices and, when
+    --include-output is set (the default), also output devices captured via
+    their PulseAudio monitor sources using parec.
     Press Ctrl+C to stop monitoring.
     """
     # Configure loguru log level based on verbose flag
@@ -347,15 +568,84 @@ def monitor(
             except Exception:
                 # Device is unavailable, skip it silently
                 pass
-        
+
         if not available_devices:
             console.print("[error]✗ No available audio devices found[/error]")
             sys.exit(1)
-        
-        console.print(f"\n[success]✓ Monitoring {len(available_devices)} device(s)[/success]")
+
+        # --- output device monitoring via PulseAudio monitor sources ---
+        # Each output sink exposes a "<sink>.monitor" source that parec can read.
+        # We spawn one parec process per sink and read raw s16le PCM from its
+        # stdout in a background thread, computing a rolling dB level.
+        output_sinks: list = []         # [{name, monitor, description, state}]
+        parec_procs: dict = {}          # sink_name -> subprocess.Popen
+        output_levels: dict = {}        # sink_name -> float (0-120 dB scale)
+        output_threads: list = []
+
+        if include_output:
+            output_sinks = RecordingEngine.list_output_devices()
+            if output_sinks:
+                console.print(f"[info]  Found {len(output_sinks)} output sink(s) to monitor via parec[/info]")
+            else:
+                console.print("[warning]  No PulseAudio sinks found (pactl unavailable?)[/warning]")
+
+        parec_chunk = chunk_size * 2  # 16-bit = 2 bytes per sample
+
+        def _read_parec(sink_name: str, proc, chunk_bytes: int):
+            """Background thread: read raw PCM from parec stdout, update output_levels."""
+            while True:
+                try:
+                    data = proc.stdout.read(chunk_bytes)
+                    if not data:
+                        break
+                    audio_array = np.frombuffer(data, dtype=np.int16)
+                    rms = np.sqrt(np.mean(audio_array.astype(float) ** 2))
+                    if rms > 0:
+                        db = 20 * np.log10(rms / 32768)
+                        db = max(0, min(120, db + 120))
+                    else:
+                        db = 0.0
+                    output_levels[sink_name] = db
+                except Exception:
+                    break
+
+        for sink in output_sinks:
+            monitor_dev = sink["monitor"]
+            output_levels[sink["name"]] = 0.0
+            try:
+                proc = subprocess.Popen(
+                    [
+                        "parec",
+                        f"--device={monitor_dev}",
+                        "--format=s16le",
+                        f"--rate={rate}",
+                        "--channels=1",
+                        "--latency-msec=50",
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                )
+                parec_procs[sink["name"]] = proc
+                t = threading.Thread(
+                    target=_read_parec,
+                    args=(sink["name"], proc, parec_chunk),
+                    daemon=True,
+                )
+                t.start()
+                output_threads.append(t)
+            except FileNotFoundError:
+                console.print("[warning]  parec not found — install pulseaudio-utils to monitor outputs[/warning]")
+                output_sinks = []
+                break
+            except Exception as exc:
+                console.print(f"[warning]  Could not open monitor for {monitor_dev}: {exc}[/warning]")
+
+        n_input = len(available_devices)
+        n_output = len([s for s in output_sinks if s["name"] in parec_procs])
+        console.print(f"\n[success]✓ Monitoring {n_input} input + {n_output} output device(s)[/success]")
         console.print("[info]Press Ctrl+C to stop monitoring[/info]\n")
 
-        # Now open streams for available devices
+        # Now open streams for available input devices
         for device_id in available_devices:
             try:
                 streams[device_id] = _try_open(device_id)
@@ -372,16 +662,27 @@ def monitor(
         tasks = {}
         for did in sorted(available_devices):
             tasks[did] = progress.add_task(
-                f"[cyan][{did}][/cyan] {device_names[did]}",
+                f"[cyan]🎤 [{did}][/cyan] {device_names[did]}",
                 total=120,
                 db_text="-- dB",
                 status="",
             )
+        # One task per output sink
+        sink_tasks = {}
+        for sink in output_sinks:
+            if sink["name"] in parec_procs:
+                label = sink["description"][:38] if len(sink["description"]) > 38 else sink["description"]
+                sink_tasks[sink["name"]] = progress.add_task(
+                    f"[magenta]🔊 OUT[/magenta] {label}",
+                    total=120,
+                    db_text="-- dB",
+                    status="",
+                )
 
         live_panel = Panel(
             progress,
             title="[bold cyan]📊 Audio Device Monitor[/bold cyan]",
-            subtitle="[dim]Ctrl+C to stop | Highest-activity device marked ACTIVE[/dim]",
+            subtitle="[dim]Ctrl+C to stop | 🎤 input  🔊 output (monitor)[/dim]",
         )
 
         # Monitoring loop with Rich Live display
@@ -390,7 +691,7 @@ def monitor(
                 if duration and (time.time() - start_time) > duration:
                     break
 
-                # Update levels from available streams
+                # Update levels from available input streams
                 for device_id, stream in streams.items():
                     try:
                         if stream.is_active():
@@ -418,11 +719,25 @@ def monitor(
                     status_str = "🎤 [bold green]ACTIVE[/bold green]" if did == max_device and max_level > 10 else ""
                     progress.update(tasks[did], completed=db_level, db_text=f"{db_level:.1f} dB", status=status_str)
 
+                # Update output sink rows from parec threads
+                for sink in output_sinks:
+                    sname = sink["name"]
+                    if sname in sink_tasks:
+                        db_level = output_levels.get(sname, 0.0)
+                        status_str = "🔊 [bold magenta]PLAYING[/bold magenta]" if db_level > 10 else ""
+                        progress.update(sink_tasks[sname], completed=db_level, db_text=f"{db_level:.1f} dB", status=status_str)
+
                 time.sleep(interval)
-    
+
     except KeyboardInterrupt:
         console.print("\n[warning]⏹ Monitoring stopped by user[/warning]")
     finally:
+        # Terminate parec subprocesses
+        for proc in parec_procs.values():
+            try:
+                proc.terminate()
+            except Exception:
+                pass
         # Close all streams
         for stream in streams.values():
             try:
