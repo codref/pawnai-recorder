@@ -17,18 +17,42 @@ reused from the existing ``s3:`` section — no duplication required::
 
     queue:
       enabled: true
-      topic: audio-chunks
+      topic: pawnai-jobs
+      transcribe_diarize:
+        threshold: 0.2
+        cross_file_threshold: 0.2
+        device: cpu
+      analyze:
+        mode: summary
+        model: gpt-4o
 
-Message payload (per uploaded chunk)
---------------------------------------
-::
+Message flow per recording session
+-----------------------------------
+For every uploaded chunk a ``transcribe-diarize`` command is published::
 
     {
-      "session_id":     "260303143022",
-      "chunk_index":    1,
-      "s3_bucket":      "my-bucket",
-      "s3_key":         "recordings/260303143022/260303143022_01.flac",
-      "conversation_id": "optional-id"   # omitted when None
+      "command": "transcribe-diarize",
+      "audio_paths": ["s3://bucket/session/session_01.flac"],
+      "threshold": 0.2,
+      "cross_file_threshold": 0.2,
+      "session": "my-session-label",
+      "device": "cpu"
+    }
+
+When all chunks are uploaded, an ``analyze`` command is published::
+
+    {
+      "command": "analyze",
+      "session": "my-session-label",
+      "mode": "summary",
+      "model": "gpt-4o"
+    }
+
+Finally a ``sync-siyuan`` command closes the pipeline::
+
+    {
+      "command": "sync-siyuan",
+      "session": "my-session-label"
     }
 """
 
@@ -165,37 +189,25 @@ class SessionQueueProducer:
     # Public API
     # ------------------------------------------------------------------
 
-    def publish(
-        self,
-        session_id: str,
-        chunk_index: int,
-        s3_key: str,
-        conversation_id: Optional[str] = None,
-    ) -> None:
-        """Fire-and-forget publish of a chunk-uploaded message.
+    def publish(self, payload: Dict[str, Any]) -> None:
+        """Fire-and-forget publish of an arbitrary payload dict.
 
         Submits the coroutine to the background event loop and returns
         immediately.  Publish errors are logged as warnings but never raised,
         so a queue failure never interrupts the audio recording.
 
         Args:
-            session_id: Recording session identifier.
-            chunk_index: Sequential chunk number within the session.
-            s3_key: S3 object key of the uploaded audio file.
-            conversation_id: Optional conversation grouping ID.
+            payload: Arbitrary JSON-serialisable dict to send as the message
+                payload.  Must include a ``"command"`` key so the consumer
+                knows how to route it (e.g. ``"transcribe-diarize"``,
+                ``"analyze"``, ``"sync-siyuan"``).
         """
         if self._producer is None:
-            logger.warning("PawnQueue producer not initialised; dropping message for chunk %d", chunk_index)
+            logger.warning(
+                "PawnQueue producer not initialised; dropping message (command=%s)",
+                payload.get("command"),
+            )
             return
-
-        payload: Dict[str, Any] = {
-            "session_id":  session_id,
-            "chunk_index": chunk_index,
-            "s3_bucket":   self._bucket,
-            "s3_key":      s3_key,
-        }
-        if conversation_id is not None:
-            payload["conversation_id"] = conversation_id
 
         producer = self._producer  # capture for closure — avoids Optional-None issue
 
@@ -203,13 +215,13 @@ class SessionQueueProducer:
             try:
                 await producer.publish(self._topic, payload)
                 logger.debug(
-                    "PawnQueue message published: topic=%r session=%s chunk=%d",
-                    self._topic, session_id, chunk_index,
+                    "PawnQueue message published: topic=%r command=%s",
+                    self._topic, payload.get("command"),
                 )
             except Exception as exc:
                 logger.warning(
-                    "PawnQueue publish failed (session=%s chunk=%d): %s",
-                    session_id, chunk_index, exc,
+                    "PawnQueue publish failed (command=%s): %s",
+                    payload.get("command"), exc,
                 )
 
         asyncio.run_coroutine_threadsafe(_do_publish(), self._loop)
@@ -217,10 +229,23 @@ class SessionQueueProducer:
     def close(self) -> None:
         """Gracefully tear down the PawnQueue client and stop the event loop.
 
-        Blocks until teardown completes (up to 10 s) so that any in-flight
-        messages are sent before the process exits.
+        First drains all pending publish tasks so that in-flight messages are
+        delivered before the aiohttp connection pool is closed.  Blocks until
+        teardown completes (up to 30 s).
         """
         async def _teardown() -> None:
+            # Drain every pending task on the loop (e.g. in-flight _do_publish
+            # coroutines) before closing the underlying aiohttp session.
+            # Without this, tasks that are still connecting/writing get
+            # ClientConnectionResetError when pq.teardown() closes the pool.
+            current = asyncio.current_task()
+            pending = [t for t in asyncio.all_tasks() if t is not current]
+            if pending:
+                logger.debug(
+                    "PawnQueue close: waiting for %d pending task(s)", len(pending)
+                )
+                await asyncio.gather(*pending, return_exceptions=True)
+
             if self._pq is not None:
                 try:
                     await self._pq.teardown()
@@ -231,7 +256,7 @@ class SessionQueueProducer:
         if self._loop.is_running():
             future = asyncio.run_coroutine_threadsafe(_teardown(), self._loop)
             try:
-                future.result(timeout=10)
+                future.result(timeout=30)
             except Exception as exc:
                 logger.warning(f"PawnQueue teardown timed out: {exc}")
 

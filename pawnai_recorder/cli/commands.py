@@ -138,6 +138,13 @@ def record(
     verbose: bool = typer.Option(
         False, "--verbose", "-v", help="Show debug output from audio libraries"
     ),
+    session: Optional[str] = typer.Option(
+        None,
+        help=(
+            "Human-readable session label sent in all queue messages. "
+            "Defaults to the auto-generated timestamp session ID when omitted."
+        ),
+    ),
     log_file: Optional[str] = typer.Option(
         None,
         help=(
@@ -180,6 +187,9 @@ def record(
                 console.print(f"[warning]PawnQueue init failed: {_qe} — publishing disabled[/warning]")
         else:
             console.print('[dim]PawnQueue: no S3 config — publishing disabled[/dim]')
+
+    # Job-level config for structured queue payloads (transcribe-diarize, analyze)
+    _queue_job_config = app_config.get_queue_job_config()
 
     # ------------------------------------------------------------------
     # OUTPUT SINK path: capture via parec <sink>.monitor
@@ -299,12 +309,16 @@ def record(
                     s3_ok = True
                     console.print(f"[dim]⬆  Uploaded chunk {idx}: {s3_key}[/dim]")
                     if _queue_producer is not None:
-                        _queue_producer.publish(
-                            session_id=session_id,
-                            chunk_index=idx,
-                            s3_key=s3_key,
-                            conversation_id=conversation_id,
-                        )
+                        _td = _queue_job_config.get('transcribe_diarize', {})
+                        _session_val = session if session is not None else session_id
+                        _queue_producer.publish({
+                            "command": "transcribe-diarize",
+                            "audio_paths": [f"s3://{_uploader.bucket}/{s3_key}"],
+                            "threshold": _td.get('threshold', 0.2),
+                            "cross_file_threshold": _td.get('cross_file_threshold', 0.2),
+                            "session": _session_val,
+                            "device": _td.get('device', 'cpu'),
+                        })
                 except Exception as _ue:
                     console.print(f"[warning]Upload failed for chunk {idx}: {_ue}[/warning]")
 
@@ -367,6 +381,18 @@ def record(
             f"[success]✓ Recorded {_total_frames / rate:.1f} s in {_chunk_count} chunk(s)[/success]"
         )
         if _queue_producer is not None:
+            _end_session = session if session is not None else session_id
+            _an = _queue_job_config.get('analyze', {})
+            _queue_producer.publish({
+                "command": "analyze",
+                "session": _end_session,
+                "mode": _an.get('mode', 'summary'),
+                "model": _an.get('model', 'gpt-4o'),
+            })
+            _queue_producer.publish({
+                "command": "sync-siyuan",
+                "session": _end_session,
+            })
             _queue_producer.close()
         return
 
@@ -420,6 +446,7 @@ def record(
             sys.exit(1)
 
     stream = None
+    _mic_session_value: Optional[str] = None
 
     def signal_handler(sig, frame):
         console.print("\n[warning]⏹ Received interrupt signal, stopping recording...[/warning]")
@@ -450,12 +477,16 @@ def record(
             datetime_format=datetime_format,
             recording_logger=recording_logger,
             queue_producer=_queue_producer,
+            session_label=session,
+            queue_job_config=_queue_job_config,
         )
         if verbose:
             session_info = stream.start_recording()
         else:
             with suppress_stderr():
                 session_info = stream.start_recording()
+
+        _mic_session_value = session if session is not None else session_info['session_id']
 
         # Build and display session summary Panel
         upload_str = "[green]enabled[/green]" if upload else "[yellow]bypassed (--no-upload)[/yellow]"
@@ -514,6 +545,18 @@ def record(
         sys.exit(1)
     finally:
         if _queue_producer is not None:
+            if _mic_session_value:
+                _an = _queue_job_config.get('analyze', {})
+                _queue_producer.publish({
+                    "command": "analyze",
+                    "session": _mic_session_value,
+                    "mode": _an.get('mode', 'summary'),
+                    "model": _an.get('model', 'gpt-4o'),
+                })
+                _queue_producer.publish({
+                    "command": "sync-siyuan",
+                    "session": _mic_session_value,
+                })
             _queue_producer.close()
 
 

@@ -186,6 +186,40 @@ class AppConfig:
             return queue_config
         return None
 
+    def get_queue_job_config(self) -> Dict[str, Any]:
+        """Return job parameters for transcribe-diarize and analyze queue messages.
+
+        Reads optional sub-sections from the ``queue:`` config block::
+
+            queue:
+              transcribe_diarize:
+                threshold: 0.2
+                cross_file_threshold: 0.2
+                device: cpu
+              analyze:
+                mode: summary
+                model: gpt-4o
+
+        Missing keys fall back to the above defaults.
+
+        Returns:
+            Dict with ``transcribe_diarize`` and ``analyze`` sub-dicts.
+        """
+        queue_cfg = self._config.get('queue') or {}
+        td = queue_cfg.get('transcribe_diarize') or {}
+        an = queue_cfg.get('analyze') or {}
+        return {
+            'transcribe_diarize': {
+                'threshold':             td.get('threshold', 0.2),
+                'cross_file_threshold': td.get('cross_file_threshold', 0.2),
+                'device':               td.get('device', 'cpu'),
+            },
+            'analyze': {
+                'mode':  an.get('mode', 'summary'),
+                'model': an.get('model', 'gpt-4o'),
+            },
+        }
+
     def get_log_path(self, output_dir: Optional['Path'] = None) -> 'Path':
         """Return the recording log file path.
 

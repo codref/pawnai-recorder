@@ -227,6 +227,8 @@ class MicrophoneStream:
         datetime_format: str = DATETIME_FORMAT,
         recording_logger: Optional[RecordingLogger] = None,
         queue_producer: Optional[SessionQueueProducer] = None,
+        session_label: Optional[str] = None,
+        queue_job_config: Optional[dict] = None,
     ) -> None:
         """Initialize the microphone stream.
 
@@ -290,6 +292,8 @@ class MicrophoneStream:
         # Recording logger and session tracking
         self._recording_logger = recording_logger
         self._queue_producer = queue_producer
+        self._session_label = session_label
+        self._queue_job_config = queue_job_config or {}
         self._session_started_at: Optional[datetime.datetime] = None
         self._total_duration_sec: float = 0.0
         self._save_lock = threading.Lock()
@@ -519,12 +523,22 @@ class MicrophoneStream:
                     s3_uploaded = True
                     logger.info(f'Uploaded to S3: s3://{self._uploader.bucket}/{s3_object_key}')
                     if self._queue_producer is not None:
-                        self._queue_producer.publish(
-                            session_id=self._session_id,
-                            chunk_index=count,
-                            s3_key=s3_object_key,
-                            conversation_id=self._conversation_id,
+                        _session_val = (
+                            self._session_label
+                            if self._session_label is not None
+                            else self._session_id
                         )
+                        _td = self._queue_job_config.get('transcribe_diarize', {})
+                        self._queue_producer.publish({
+                            "command": "transcribe-diarize",
+                            "audio_paths": [
+                                f"s3://{self._uploader.bucket}/{s3_object_key}"
+                            ],
+                            "threshold": _td.get('threshold', 0.2),
+                            "cross_file_threshold": _td.get('cross_file_threshold', 0.2),
+                            "session": _session_val,
+                            "device": _td.get('device', 'cpu'),
+                        })
                 except Exception as error:
                     logger.warning(f'Upload failed for {filename}: {error}')
 
