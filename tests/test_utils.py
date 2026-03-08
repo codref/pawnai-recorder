@@ -1,6 +1,6 @@
 """Utility tests for PawnAI Recorder."""
 
-from pawnai_recorder.cli.utils import console
+from pawn_recorder_cli.utils import console
 
 
 def test_console_available():

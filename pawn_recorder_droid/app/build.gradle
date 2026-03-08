@@ -1,0 +1,70 @@
+// pawn_recorder_droid/app/build.gradle
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+    id 'com.chaquo.python'
+}
+
+android {
+    namespace   'com.pawnrecorder'
+    compileSdk  36
+
+    defaultConfig {
+        applicationId    'com.pawnrecorder.app'
+        minSdk           26       // AAudio requires API 26
+        targetSdk        36
+        versionCode      1
+        versionName      '1.0.0'
+
+        ndk {
+            abiFilters 'arm64-v8a', 'x86_64'
+        }
+
+        python {
+            version '3.11'
+            pip {
+                install 'flask'         // pure Python HTTP server — no Rust deps
+                install 'loguru'
+                install 'boto3'
+                install 'PyYAML'
+                install 'numpy'
+                install 'soundfile'
+                install 'debugpy'       // VS Code remote debug adapter
+            }
+        }
+    }
+
+    // NDK / CMake for AAudio C recorder
+    externalNativeBuild {
+        cmake {
+            path   'src/main/jni/CMakeLists.txt'
+            version '3.22.1'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+}
+
+dependencies {
+    implementation 'androidx.core:core-ktx:1.13.1'
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.8.6'
+    implementation 'com.google.android.material:material:1.12.0'
+}
+
+// Include shared Python core package directly from repository source.
+chaquopy.sourceSets.getByName('main').srcDir("${rootDir}/../pawn_recorder")

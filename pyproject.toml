@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "pawnai-recorder"
+name = "pawn-recorder"
 version = "1.0.0"
 description = "Professional audio recording and management CLI"
 readme = "README.md"
@@ -50,9 +50,21 @@ Repository = "https://github.com/pawnai/pawnai-recorder.git"
 Issues = "https://github.com/pawnai/pawnai-recorder/issues"
 
 [project.scripts]
-pawnai-recorder = "pawnai_recorder.__main__:main"
+pawn-recorder = "pawn_recorder_cli.__main__:main"
 
 [project.optional-dependencies]
+android = [
+    "flask>=3.0.0",             # pure Python HTTP server (no Rust deps)
+    "loguru>=0.7.2",
+    "boto3>=1.34.0",
+    "PyYAML>=6.0.1",
+    "numpy>=1.21.0",
+    "soundfile>=0.12.1",
+    # Building the APK requires the Android SDK + Gradle.
+    # Run: make setup-android   (installs SDK components)
+    # Then: make android-debug  (./gradlew assembleDebug inside pawn_recorder_droid/)
+]
+
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
@@ -62,7 +74,16 @@ dev = [
 ]
 
 [tool.setuptools]
-packages = ["pawnai_recorder", "pawnai_recorder.cli", "pawnai_recorder.core", "pawnai_recorder.utils"]
+packages = [
+    "pawn_recorder",
+    "pawn_recorder.core",
+    "pawn_recorder.utils",
+    "pawn_recorder_cli",
+    "pawn_recorder_droid",
+    "pawn_recorder_droid.screens",
+    "pawn_recorder_droid.audio",
+    "pawnai_recorder",
+]
 
 [tool.black]
 line-length = 100
@@ -92,4 +113,4 @@ disallow_untyped_defs = false
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
-addopts = "--cov=pawnai_recorder --cov-report=html --cov-report=term-missing"
+addopts = "--cov=pawn_recorder --cov-report=html --cov-report=term-missing"

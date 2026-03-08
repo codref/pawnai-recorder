@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+  <title>PawnRecorder</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="container">
+    <h1 class="logo">🎙 PawnRecorder</h1>
+
+    <div class="status-card">
+      <div class="status-row">
+        <span class="label">Status</span>
+        <span id="status-text" class="value">Idle</span>
+      </div>
+      <div class="status-row">
+        <span class="label">Session</span>
+        <span id="session-id" class="value mono">—</span>
+      </div>
+      <div class="status-row">
+        <span class="label">Elapsed</span>
+        <span id="elapsed" class="value">—</span>
+      </div>
+      <div class="status-row">
+        <span class="label">Chunks saved</span>
+        <span id="chunks" class="value">0</span>
+      </div>
+    </div>
+
+    <div class="error-box" id="error-box" style="display:none">
+      <span id="error-msg"></span>
+    </div>
+
+    <button id="main-btn" class="btn btn-start" onclick="toggleRecording()">
+      Start Recording
+    </button>
+  </div>
+
+  <script>
+    let recording = false;
+
+    /* ── API helpers ──────────────────────────────────────────────────── */
+    async function apiPost(path) {
+      const res = await fetch(path, { method: "POST" });
+      return res.json();
+    }
+
+    async function apiGet(path) {
+      const res = await fetch(path);
+      return res.json();
+    }
+
+    /* ── Toggle button ────────────────────────────────────────────────── */
+    async function toggleRecording() {
+      const btn = document.getElementById("main-btn");
+      btn.disabled = true;
+
+      if (!recording) {
+        const data = await apiPost("/api/sessions/start");
+        if (data.ok) {
+          recording = true;
+          showError(null);
+        } else {
+          showError(data.error || "Failed to start");
+        }
+      } else {
+        const data = await apiPost("/api/sessions/stop");
+        if (data.ok) {
+          recording = false;
+          showError(null);
+        } else {
+          showError(data.error || "Failed to stop");
+        }
+      }
+
+      updateButton();
+      btn.disabled = false;
+    }
+
+    /* ── Status poll (every 1 s) ──────────────────────────────────────── */
+    async function pollStatus() {
+      try {
+        const s = await apiGet("/api/status");
+        recording = s.recording;
+        updateButton();
+
+        document.getElementById("status-text").textContent =
+          s.recording ? "● Recording" : "Idle";
+        document.getElementById("status-text").className =
+          "value " + (s.recording ? "recording" : "");
+
+        document.getElementById("session-id").textContent =
+          s.session_id || "—";
+        document.getElementById("elapsed").textContent =
+          s.elapsed_s != null ? s.elapsed_s + " s" : "—";
+        document.getElementById("chunks").textContent =
+          s.chunks_saved ?? 0;
+
+        if (s.error) showError(s.error);
+      } catch (_) { /* server may still be starting */ }
+    }
+
+    function updateButton() {
+      const btn = document.getElementById("main-btn");
+      if (recording) {
+        btn.textContent = "Stop Recording";
+        btn.className   = "btn btn-stop";
+      } else {
+        btn.textContent = "Start Recording";
+        btn.className   = "btn btn-start";
+      }
+    }
+
+    function showError(msg) {
+      const box = document.getElementById("error-box");
+      if (msg) {
+        document.getElementById("error-msg").textContent = msg;
+        box.style.display = "block";
+      } else {
+        box.style.display = "none";
+      }
+    }
+
+    setInterval(pollStatus, 1000);
+    pollStatus();
+  </script>
+</body>
+</html>

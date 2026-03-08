@@ -1,9 +1,9 @@
-"""Entry point for PawnAI Recorder when invoked as a module or command."""
+"""Entry point for pawn-recorder CLI when invoked as a module or command."""
 
 import sys
 
-from pawnai_recorder.cli import app
-from pawnai_recorder.cli.utils import console
+from pawn_recorder_cli import app
+from pawn_recorder_cli.utils import console
 
 
 def main() -> None:

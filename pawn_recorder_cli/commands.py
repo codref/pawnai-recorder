@@ -18,18 +18,18 @@ from rich.panel import Panel
 from rich.prompt import IntPrompt
 from rich.table import Table
 
-from pawnai_recorder.core import (
+from pawn_recorder.core import (
     MicrophoneStream,
     RecordingEngine,
 )
-from pawnai_recorder.core.queue_producer import SessionQueueProducer
-from pawnai_recorder.core.s3_upload import S3Uploader
-from pawnai_recorder.core.config import (
+from pawn_recorder.core.queue_producer import SessionQueueProducer
+from pawn_recorder.core.s3_upload import S3Uploader
+from pawn_recorder.core.config import (
     AppConfig, RATE, RECORDING_CHUNK_SIZE, FILE_EXTENSION, CHUNK_DIR,
     TIMESTAMP_FORMAT, DATETIME_FORMAT,
 )
-from pawnai_recorder.core.log import RecordingLogger
-from pawnai_recorder.cli.utils import console, suppress_stderr, make_device_table, make_level_progress, make_monitor_progress, make_sinks_table
+from pawn_recorder.core.log import RecordingLogger
+from pawn_recorder_cli.utils import console, suppress_stderr, make_device_table, make_level_progress, make_monitor_progress, make_sinks_table
 
 app = typer.Typer(help="Professional audio recording and management CLI")
 

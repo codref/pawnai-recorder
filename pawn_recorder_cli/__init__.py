@@ -1,4 +1,4 @@
-"""CLI layer for PawnAI Recorder."""
+"""CLI layer for pawn-recorder."""
 
 from .commands import app
 

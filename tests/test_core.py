@@ -2,14 +2,14 @@
 
 import pytest
 import yaml
-from pawnai_recorder.core import (
+from pawn_recorder.core import (
     calculate_db_level,
     apply_gain,
     detect_driver_type,
     AppConfig,
     build_object_key,
 )
-from pawnai_recorder.core.s3_upload import S3Uploader
+from pawn_recorder.core.s3_upload import S3Uploader
 
 
 def test_calculate_db_level():
@@ -68,7 +68,7 @@ def test_app_config():
 
 def test_app_config_loads_yaml(tmp_path, monkeypatch):
     """Test YAML config loading from project root."""
-    config_file = tmp_path / ".pawnai-recorder.yml"
+    config_file = tmp_path / ".pawn-recorder.yml"
     config_file.write_text(
         yaml.safe_dump(
             {
@@ -127,7 +127,7 @@ def test_build_object_key_with_conversation_id_and_prefix():
 
 def test_log_creates_file(tmp_path):
     """RecordingLogger creates the log file on first write."""
-    from pawnai_recorder.core.log import RecordingLogger
+    from pawn_recorder.core.log import RecordingLogger
 
     log_path = tmp_path / "subdir" / "recordings.jsonl"
     logger = RecordingLogger(log_path)
@@ -146,7 +146,7 @@ def test_log_creates_file(tmp_path):
 def test_log_session_roundtrip(tmp_path):
     """session-start and session-end records contain all expected fields."""
     import json
-    from pawnai_recorder.core.log import RecordingLogger
+    from pawn_recorder.core.log import RecordingLogger
 
     log_path = tmp_path / "recordings.jsonl"
     rl = RecordingLogger(log_path)
@@ -192,7 +192,7 @@ def test_log_session_roundtrip(tmp_path):
 def test_log_chunk_entry(tmp_path):
     """Chunk records capture file path, duration, and S3 upload status."""
     import json
-    from pawnai_recorder.core.log import RecordingLogger
+    from pawn_recorder.core.log import RecordingLogger
 
     log_path = tmp_path / "recordings.jsonl"
     rl = RecordingLogger(log_path)
@@ -220,7 +220,7 @@ def test_log_chunk_entry(tmp_path):
 def test_log_chunk_with_s3(tmp_path):
     """Chunk records reflect successful S3 upload."""
     import json
-    from pawnai_recorder.core.log import RecordingLogger
+    from pawn_recorder.core.log import RecordingLogger
 
     log_path = tmp_path / "recordings.jsonl"
     rl = RecordingLogger(log_path)
@@ -242,7 +242,7 @@ def test_log_chunk_with_s3(tmp_path):
 
 def test_log_get_log_path_default(tmp_path, monkeypatch):
     """AppConfig.get_log_path() defaults to output_dir/recordings.jsonl."""
-    from pawnai_recorder.core.config import AppConfig, LOG_FILE
+    from pawn_recorder.core.config import AppConfig, LOG_FILE
 
     monkeypatch.chdir(tmp_path)
     config = AppConfig()
@@ -254,9 +254,9 @@ def test_log_get_log_path_default(tmp_path, monkeypatch):
 def test_log_get_log_path_from_yaml(tmp_path, monkeypatch):
     """AppConfig.get_log_path() respects the log.file YAML key."""
     import yaml
-    from pawnai_recorder.core.config import AppConfig
+    from pawn_recorder.core.config import AppConfig
 
-    config_file = tmp_path / ".pawnai-recorder.yml"
+    config_file = tmp_path / ".pawn-recorder.yml"
     config_file.write_text(
         yaml.safe_dump({"log": {"file": "my_log.jsonl"}}),
         encoding="utf-8",

@@ -2,7 +2,7 @@
 
 This module provides configuration constants and the :class:`AppConfig` class
 which merges defaults with values from an optional YAML file
-(``.pawnai-recorder.yml`` in the working directory).
+(``.pawn-recorder.yml`` in the working directory).
 
 Audio constants
 ---------------
@@ -38,7 +38,7 @@ recording device ID can be embedded without any post-processing.
 
 Configuration file (``recording:`` section)
 -------------------------------------------
-All constants above can be overridden at runtime via ``.pawnai-recorder.yml``
+All constants above can be overridden at runtime via ``.pawn-recorder.yml``
 placed in the project root:
 
 .. code-block:: yaml
@@ -71,7 +71,7 @@ CHUNK_DIR = 'audio/'
 #   {device_id} - numeric audio device ID (or 'default' when not set)
 DATETIME_FORMAT = '%y%m%d%H%M%S'
 TIMESTAMP_FORMAT = '{ts}'  # default: datetime only, e.g. '231015143022'
-S3_CONFIG_FILE = '.pawnai-recorder.yml'
+S3_CONFIG_FILE = '.pawn-recorder.yml'
 
 # Local recording log
 LOG_FILE = 'recordings.jsonl'
@@ -168,7 +168,7 @@ class AppConfig:
     def get_queue_config(self) -> Optional[Dict[str, Any]]:
         """Get queue producer configuration, if present.
 
-        Expects a ``queue:`` top-level key in ``.pawnai-recorder.yml`` with at
+        Expects a ``queue:`` top-level key in ``.pawn-recorder.yml`` with at
         least a ``topic`` field and an optional ``enabled`` flag::
 
             queue:
@@ -224,7 +224,7 @@ class AppConfig:
         """Return the recording log file path.
 
         The log file name is taken from the ``log.file`` key in
-        ``.pawnai-recorder.yml`` when present, otherwise from the
+        ``.pawn-recorder.yml`` when present, otherwise from the
         :data:`LOG_FILE` constant.  The file is placed inside *output_dir*
         (defaults to :meth:`get_output_dir`).
 

@@ -1,8 +1,8 @@
-"""CLI integration tests for PawnAI Recorder."""
+"""CLI integration tests for pawn-recorder."""
 
 import pytest
 from typer.testing import CliRunner
-from pawnai_recorder.cli import app
+from pawn_recorder_cli import app
 
 runner = CliRunner()
 
@@ -18,7 +18,7 @@ def test_status_command(tmp_path, monkeypatch):
     # run in temporary directory so that existing workspace config is ignored
     monkeypatch.chdir(tmp_path)
     # recreate app_config so it reads from the new cwd
-    from pawnai_recorder.cli import commands
+    from pawn_recorder_cli import commands
     commands.app_config = commands.AppConfig()
     result = runner.invoke(app, ["status"])
     assert result.exit_code == 0
@@ -29,7 +29,7 @@ def test_status_with_s3_available(tmp_path, monkeypatch):
     """Status should report available when uploader.check_bucket returns True."""
     # create minimal config file inside clean dir
     monkeypatch.chdir(tmp_path)
-    config_file = tmp_path / ".pawnai-recorder.yml"
+    config_file = tmp_path / ".pawn-recorder.yml"
     config_file.write_text(
         """
         s3:
@@ -41,11 +41,11 @@ def test_status_with_s3_available(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     # refresh config after creating file
-    from pawnai_recorder.cli import commands
+    from pawn_recorder_cli import commands
     commands.app_config = commands.AppConfig()
 
     # patch S3Uploader.check_bucket
-    from pawnai_recorder.core.s3_upload import S3Uploader
+    from pawn_recorder.core.s3_upload import S3Uploader
 
     monkeypatch.setattr(S3Uploader, "check_bucket", lambda self: True)
     monkeypatch.setattr(S3Uploader, "bucket", property(lambda self: "my-bucket"))
@@ -59,7 +59,7 @@ def test_status_with_s3_available(tmp_path, monkeypatch):
 def test_status_with_s3_unreachable(tmp_path, monkeypatch):
     """Status should warn when uploader.check_bucket returns False."""
     monkeypatch.chdir(tmp_path)
-    config_file = tmp_path / ".pawnai-recorder.yml"
+    config_file = tmp_path / ".pawn-recorder.yml"
     config_file.write_text(
         """
         s3:
@@ -70,10 +70,10 @@ def test_status_with_s3_unreachable(tmp_path, monkeypatch):
         """,
         encoding="utf-8",
     )
-    from pawnai_recorder.cli import commands
+    from pawn_recorder_cli import commands
     commands.app_config = commands.AppConfig()
 
-    from pawnai_recorder.core.s3_upload import S3Uploader
+    from pawn_recorder.core.s3_upload import S3Uploader
 
     monkeypatch.setattr(S3Uploader, "check_bucket", lambda self: False)
     monkeypatch.setattr(S3Uploader, "bucket", property(lambda self: "other"))
