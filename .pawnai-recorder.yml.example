@@ -33,6 +33,57 @@ s3:
   verify_ssl: true
   path_style: true
 
+queue:
+  # Master switch.  Set to false to disable all queue publishing without
+  # removing the rest of the configuration.
+  enabled: true
+
+  # PawnQueue topic name.  The topic is created automatically on first use
+  # if it does not already exist.
+  topic: audio-chunks
+
+  # Producer name registered in the queue registry.
+  # Defaults to "pawnai-recorder" when omitted.
+  producer_name: pawnai-recorder
+
+  # ── transcribe-diarize command ─────────────────────────────────────────
+  # Published once per uploaded audio chunk.
+  # Omit this block to use the consumer-side defaults.
+  transcribe_diarize:
+    # When to publish the transcribe-diarize command.
+    #   end_of_session (default) - one message with all chunk paths is sent
+    #     after the client terminates the audio stream, just before analyze.
+    #   per_chunk - a separate message is sent immediately after each chunk
+    #     is uploaded (legacy behaviour).
+    mode: end_of_session
+
+    # Speaker-change detection sensitivity.
+    # Lower values → more segments; higher values → fewer, longer segments.
+    threshold: 0.2
+
+    # Similarity threshold used when stitching speakers across consecutive
+    # chunks of the same session.
+    cross_file_threshold: 0.2
+
+    # Inference device for Whisper / pyannote models.
+    # One of: cpu | cuda | mps
+    device: cpu
+
+  # ── analyze command ────────────────────────────────────────────────────
+  # Published once per recording session after all chunks are uploaded.
+  # Omit this block to skip the analyze step.
+  analyze:
+    # Processing mode passed to the analyzer.
+    # Examples: summary | action-items | transcript | qa
+    mode: summary
+
+    # LLM model identifier forwarded to the analyzer backend.
+    model: gpt-4o
+
+  # ── sync-siyuan command ────────────────────────────────────────────────
+  # Published at the very end of each session to close the pipeline.
+  # No parameters — always sent when the queue is enabled.
+
 log:
   # Local JSONL recording log
   # The log file is created inside output_dir.

@@ -298,6 +298,9 @@ class MicrophoneStream:
         self._total_duration_sec: float = 0.0
         self._save_lock = threading.Lock()
         self._saving_threads: list = []
+        # S3 object keys collected across all chunks for the end-of-session
+        # transcribe-diarize message (used when mode == 'end_of_session').
+        self._s3_upload_keys: list = []
 
         self._initialize_uploader()
 
@@ -415,6 +418,29 @@ class MicrophoneStream:
                 chunk_count=self._count,
             )
 
+        # End-of-session transcribe-diarize: publish a single message covering
+        # all uploaded chunks now that the client has terminated the audio stream.
+        if self._queue_producer is not None and self._s3_upload_keys:
+            _td = self._queue_job_config.get('transcribe_diarize', {})
+            if _td.get('mode', 'end_of_session') == 'end_of_session':
+                _session_val = (
+                    self._session_label
+                    if self._session_label is not None
+                    else self._session_id
+                )
+                self._queue_producer.publish({
+                    "command": "transcribe-diarize",
+                    "audio_paths": list(self._s3_upload_keys),
+                    "threshold": _td.get('threshold', 0.2),
+                    "cross_file_threshold": _td.get('cross_file_threshold', 0.2),
+                    "session": _session_val,
+                    "device": _td.get('device', 'cpu'),
+                })
+                logger.info(
+                    f'End-of-session transcribe-diarize published '
+                    f'({len(self._s3_upload_keys)} chunk(s))'
+                )
+
         logger.info('Microphone has been closed')
 
     def _fill_buffer(
@@ -523,22 +549,30 @@ class MicrophoneStream:
                     s3_uploaded = True
                     logger.info(f'Uploaded to S3: s3://{self._uploader.bucket}/{s3_object_key}')
                     if self._queue_producer is not None:
-                        _session_val = (
-                            self._session_label
-                            if self._session_label is not None
-                            else self._session_id
-                        )
                         _td = self._queue_job_config.get('transcribe_diarize', {})
-                        self._queue_producer.publish({
-                            "command": "transcribe-diarize",
-                            "audio_paths": [
-                                f"s3://{self._uploader.bucket}/{s3_object_key}"
-                            ],
-                            "threshold": _td.get('threshold', 0.2),
-                            "cross_file_threshold": _td.get('cross_file_threshold', 0.2),
-                            "session": _session_val,
-                            "device": _td.get('device', 'cpu'),
-                        })
+                        _td_mode = _td.get('mode', 'end_of_session')
+                        if _td_mode == 'per_chunk':
+                            _session_val = (
+                                self._session_label
+                                if self._session_label is not None
+                                else self._session_id
+                            )
+                            self._queue_producer.publish({
+                                "command": "transcribe-diarize",
+                                "audio_paths": [
+                                    f"s3://{self._uploader.bucket}/{s3_object_key}"
+                                ],
+                                "threshold": _td.get('threshold', 0.2),
+                                "cross_file_threshold": _td.get('cross_file_threshold', 0.2),
+                                "session": _session_val,
+                                "device": _td.get('device', 'cpu'),
+                            })
+                        else:
+                            # end_of_session (default): accumulate; publish once at stop_recording
+                            with self._save_lock:
+                                self._s3_upload_keys.append(
+                                    f"s3://{self._uploader.bucket}/{s3_object_key}"
+                                )
                 except Exception as error:
                     logger.warning(f'Upload failed for {filename}: {error}')
 

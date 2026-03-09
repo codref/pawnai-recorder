@@ -213,6 +213,9 @@ class AppConfig:
                 'threshold':             td.get('threshold', 0.2),
                 'cross_file_threshold': td.get('cross_file_threshold', 0.2),
                 'device':               td.get('device', 'cpu'),
+                # 'end_of_session' (default) → one message with all audio_paths after
+                # the client terminates the stream; 'per_chunk' → one message per chunk.
+                'mode':                  td.get('mode', 'end_of_session'),
             },
             'analyze': {
                 'mode':  an.get('mode', 'summary'),

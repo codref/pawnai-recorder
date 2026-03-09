@@ -242,6 +242,10 @@ def record(
             gain_str += f" ({20 * np.log10(gain):+.1f} dB)"
         upload_str = "[green]enabled[/green]" if _uploader else "[yellow]disabled[/yellow]"
 
+        # Accumulates S3 object URIs; flushed in one transcribe-diarize message
+        # at session end when mode == 'end_of_session' (default).
+        _sink_s3_keys: list = []
+
         console.print(Panel(
             f"[dim]Monitor:[/dim]    {monitor_source}\n"
             f"[dim]Session:[/dim]    {session_id}\n"
@@ -310,15 +314,20 @@ def record(
                     console.print(f"[dim]⬆  Uploaded chunk {idx}: {s3_key}[/dim]")
                     if _queue_producer is not None:
                         _td = _queue_job_config.get('transcribe_diarize', {})
-                        _session_val = session if session is not None else session_id
-                        _queue_producer.publish({
-                            "command": "transcribe-diarize",
-                            "audio_paths": [f"s3://{_uploader.bucket}/{s3_key}"],
-                            "threshold": _td.get('threshold', 0.2),
-                            "cross_file_threshold": _td.get('cross_file_threshold', 0.2),
-                            "session": _session_val,
-                            "device": _td.get('device', 'cpu'),
-                        })
+                        _td_mode = _td.get('mode', 'end_of_session')
+                        if _td_mode == 'per_chunk':
+                            _session_val = session if session is not None else session_id
+                            _queue_producer.publish({
+                                "command": "transcribe-diarize",
+                                "audio_paths": [f"s3://{_uploader.bucket}/{s3_key}"],
+                                "threshold": _td.get('threshold', 0.2),
+                                "cross_file_threshold": _td.get('cross_file_threshold', 0.2),
+                                "session": _session_val,
+                                "device": _td.get('device', 'cpu'),
+                            })
+                        else:
+                            # end_of_session (default): accumulate for a single message at session end
+                            _sink_s3_keys.append(f"s3://{_uploader.bucket}/{s3_key}")
                 except Exception as _ue:
                     console.print(f"[warning]Upload failed for chunk {idx}: {_ue}[/warning]")
 
@@ -382,6 +391,18 @@ def record(
         )
         if _queue_producer is not None:
             _end_session = session if session is not None else session_id
+            # End-of-session transcribe-diarize: one message covering all chunks,
+            # published just before analyze so the pipeline receives the full context.
+            _td = _queue_job_config.get('transcribe_diarize', {})
+            if _td.get('mode', 'end_of_session') == 'end_of_session' and _sink_s3_keys:
+                _queue_producer.publish({
+                    "command": "transcribe-diarize",
+                    "audio_paths": list(_sink_s3_keys),
+                    "threshold": _td.get('threshold', 0.2),
+                    "cross_file_threshold": _td.get('cross_file_threshold', 0.2),
+                    "session": _end_session,
+                    "device": _td.get('device', 'cpu'),
+                })
             _an = _queue_job_config.get('analyze', {})
             _queue_producer.publish({
                 "command": "analyze",
