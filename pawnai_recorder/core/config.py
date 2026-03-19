@@ -207,7 +207,9 @@ class AppConfig:
         """
         queue_cfg = self._config.get('queue') or {}
         td = queue_cfg.get('transcribe_diarize') or {}
-        an = queue_cfg.get('analyze') or {}
+        an_raw = queue_cfg.get('analyze')        # None when block is absent/commented
+        sy_raw = queue_cfg.get('sync_siyuan')    # None when block is absent/commented
+        an = an_raw or {}
         return {
             'transcribe_diarize': {
                 'threshold':             td.get('threshold', 0.2),
@@ -217,10 +219,13 @@ class AppConfig:
                 # the client terminates the stream; 'per_chunk' → one message per chunk.
                 'mode':                  td.get('mode', 'end_of_session'),
             },
-            'analyze': {
+            # None when the analyze: block is absent — callers must skip publishing.
+            'analyze': None if an_raw is None else {
                 'mode':  an.get('mode', 'summary'),
                 'model': an.get('model', 'gpt-4o'),
             },
+            # None when the sync_siyuan: block is absent — callers must skip publishing.
+            'sync_siyuan': None if sy_raw is None else {},
         }
 
     def get_log_path(self, output_dir: Optional['Path'] = None) -> 'Path':

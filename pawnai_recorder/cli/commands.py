@@ -403,17 +403,19 @@ def record(
                     "session": _end_session,
                     "device": _td.get('device', 'cpu'),
                 })
-            _an = _queue_job_config.get('analyze', {})
-            _queue_producer.publish({
-                "command": "analyze",
-                "session": _end_session,
-                "mode": _an.get('mode', 'summary'),
-                "model": _an.get('model', 'gpt-4o'),
-            })
-            _queue_producer.publish({
-                "command": "sync-siyuan",
-                "session": _end_session,
-            })
+            _an = _queue_job_config.get('analyze')
+            if _an is not None:
+                _queue_producer.publish({
+                    "command": "analyze",
+                    "session": _end_session,
+                    "mode": _an.get('mode', 'summary'),
+                    "model": _an.get('model', 'gpt-4o'),
+                })
+            if _queue_job_config.get('sync_siyuan') is not None:
+                _queue_producer.publish({
+                    "command": "sync-siyuan",
+                    "session": _end_session,
+                })
             _queue_producer.close()
         return
 
@@ -567,17 +569,19 @@ def record(
     finally:
         if _queue_producer is not None:
             if _mic_session_value:
-                _an = _queue_job_config.get('analyze', {})
-                _queue_producer.publish({
-                    "command": "analyze",
-                    "session": _mic_session_value,
-                    "mode": _an.get('mode', 'summary'),
-                    "model": _an.get('model', 'gpt-4o'),
-                })
-                _queue_producer.publish({
-                    "command": "sync-siyuan",
-                    "session": _mic_session_value,
-                })
+                _an = _queue_job_config.get('analyze')
+                if _an is not None:
+                    _queue_producer.publish({
+                        "command": "analyze",
+                        "session": _mic_session_value,
+                        "mode": _an.get('mode', 'summary'),
+                        "model": _an.get('model', 'gpt-4o'),
+                    })
+                if _queue_job_config.get('sync_siyuan') is not None:
+                    _queue_producer.publish({
+                        "command": "sync-siyuan",
+                        "session": _mic_session_value,
+                    })
             _queue_producer.close()
 
 
