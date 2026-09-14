@@ -76,7 +76,7 @@ class SettingsRepository(private val context: Context) {
         rate = this[Keys.RATE] ?: 16_000,
         chunkSizeSec = this[Keys.CHUNK_SIZE] ?: 120,
         gain = this[Keys.GAIN] ?: 1.0f,
-        fileExtension = this[Keys.FILE_EXT] ?: "wav",
+        fileExtension = this[Keys.FILE_EXT] ?: "flac",
         timestampFormat = this[Keys.TS_FORMAT] ?: "{ts}",
         datetimeFormat = this[Keys.DT_FORMAT] ?: "yyMMddHHmmss",
         conversationId = this[Keys.CONVERSATION_ID] ?: "",

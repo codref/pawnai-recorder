@@ -24,3 +24,6 @@
 -keepnames @kotlin.Metadata class com.composables.jetpackcomposetemplate.apimodel.**
 -keep class com.composables.jetpackcomposetemplate.apimodel.** { *; }
 -keepclassmembers class com.composables.jetpackcomposetemplate.apimodel.** { *; }
+
+# Native FLAC encoder (JNI)
+-keep class com.pawnai.recorder.audio.FlacEncoder { *; }

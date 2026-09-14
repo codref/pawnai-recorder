@@ -21,6 +21,30 @@ android {
         vectorDrawables {
             useSupportLibrary true
         }
+
+        externalNativeBuild {
+            cmake {
+                arguments "-DANDROID_STL=c++_shared"
+            }
+        }
+        ndk {
+            abiFilters "armeabi-v7a", "arm64-v8a", "x86_64"
+        }
+    }
+
+    // Prefer SDK NDK; fall back to project-local install under android/.android-sdk/
+    def ndkVer = "27.0.12077973"
+    ndkVersion ndkVer
+    def localNdk = file("${rootDir}/.android-sdk/ndk/${ndkVer}")
+    if (localNdk.exists()) {
+        ndkPath localNdk.absolutePath
+    }
+
+    externalNativeBuild {
+        cmake {
+            path file("src/main/cpp/CMakeLists.txt")
+            version "3.22.1"
+        }
     }
 
     buildTypes {

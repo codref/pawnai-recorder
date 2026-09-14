@@ -5,7 +5,7 @@ data class RecorderSettings(
     val rate: Int = 16_000,
     val chunkSizeSec: Int = 120,
     val gain: Float = 1.0f,
-    val fileExtension: String = "wav",
+    val fileExtension: String = "flac",
     val timestampFormat: String = "{ts}",
     val datetimeFormat: String = "yyMMddHHmmss",
     val conversationId: String = "",

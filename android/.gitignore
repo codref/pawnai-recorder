@@ -7,7 +7,9 @@
 /captures
 .externalNativeBuild
 .cxx
+.android-sdk/
 *.apk
 *.ap_
 *.aab
 template/build/
+template/.cxx/
