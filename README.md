@@ -281,7 +281,10 @@ for line in sys.stdin:
 (see [Configuration](#configuration)).
 
 
-## Running as a module
+## Android client
+
+See [`android/`](android/) for the Jetpack Compose recording client (S3 upload + Kotlin PawnQueue from `pawnai-sqs/kotlin`).
+
 
 You can also run the application as a Python module:
 
