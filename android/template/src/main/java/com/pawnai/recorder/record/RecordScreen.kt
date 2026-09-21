@@ -18,7 +18,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.ArrowDropDown
 import androidx.compose.material.icons.rounded.Casino
 import androidx.compose.material.icons.rounded.CloudUpload
 import androidx.compose.material.icons.rounded.Mic
@@ -27,6 +26,7 @@ import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -39,6 +39,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -46,6 +47,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -54,6 +56,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.pawnai.recorder.audio.ChunkSession
 import com.pawnai.recorder.audio.ChunkStatus
+import com.pawnai.recorder.audio.SessionNameGenerator
 import com.pawnai.recorder.destinations.SettingsScreenDestination
 import com.pawnai.recorder.di.recordViewModel
 import com.ramcosta.composedestinations.annotation.Destination
@@ -191,8 +194,20 @@ private fun SessionNameRow(
     onPick: (String) -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
-    // Local draft so typing isn't interrupted by datastore round-trips on every key.
-    var draft by remember(name, locked) { mutableStateOf(name) }
+    var focused by remember { mutableStateOf(false) }
+    // Local draft so typing isn't interrupted by normalize/datastore round-trips.
+    var draft by remember { mutableStateOf(name) }
+    val historyChoices = remember(history, draft) {
+        history.filterNot { it.equals(draft, ignoreCase = true) }
+    }
+
+    LaunchedEffect(name, locked) {
+        when {
+            locked || !focused -> draft = name
+            // External change (randomize / pick) while focused — not just normalize of draft.
+            SessionNameGenerator.normalize(draft) != name && draft != name -> draft = name
+        }
+    }
 
     Column(modifier = Modifier.fillMaxWidth()) {
         Text(
@@ -226,13 +241,29 @@ private fun SessionNameRow(
                         singleLine = true,
                         modifier = Modifier
                             .menuAnchor(type = MenuAnchorType.PrimaryEditable)
-                            .fillMaxWidth(),
+                            .fillMaxWidth()
+                            .onFocusChanged { focusState ->
+                                val wasFocused = focused
+                                focused = focusState.isFocused
+                                if (wasFocused && !focusState.isFocused) {
+                                    // Commit + show normalized form after editing finishes.
+                                    val normalized = SessionNameGenerator.normalize(draft)
+                                    draft = normalized
+                                    if (normalized != name) onNameChange(normalized)
+                                    expanded = false
+                                }
+                            },
                         placeholder = { Text("super-cat") },
                         trailingIcon = {
                             if (history.isNotEmpty()) {
-                                IconButton(onClick = { expanded = !expanded }) {
-                                    Icon(Icons.Rounded.ArrowDropDown, contentDescription = "History")
-                                }
+                                // SecondaryEditable is required so the caret toggles the menu
+                                // without fighting text focus (and without a double-toggle IconButton).
+                                ExposedDropdownMenuDefaults.TrailingIcon(
+                                    expanded = expanded,
+                                    modifier = Modifier.menuAnchor(
+                                        type = MenuAnchorType.SecondaryEditable,
+                                    ),
+                                )
                             }
                         },
                     )
@@ -240,20 +271,29 @@ private fun SessionNameRow(
                         expanded = expanded && history.isNotEmpty(),
                         onDismissRequest = { expanded = false },
                     ) {
-                        history.forEach { item ->
+                        if (historyChoices.isEmpty()) {
                             DropdownMenuItem(
-                                text = { Text(item) },
-                                onClick = {
-                                    expanded = false
-                                    draft = item
-                                    onPick(item)
-                                },
+                                text = { Text("No other sessions") },
+                                onClick = { expanded = false },
+                                enabled = false,
                             )
+                        } else {
+                            historyChoices.forEach { item ->
+                                DropdownMenuItem(
+                                    text = { Text(item) },
+                                    onClick = {
+                                        expanded = false
+                                        draft = item
+                                        onPick(item)
+                                    },
+                                )
+                            }
                         }
                     }
                 }
                 Spacer(Modifier.width(4.dp))
                 IconButton(onClick = {
+                    expanded = false
                     onRandomize()
                 }) {
                     Icon(Icons.Rounded.Casino, contentDescription = "Randomize session name")
