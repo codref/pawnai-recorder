@@ -1,8 +1,10 @@
 # PawnAI Recorder
 
-A Python audio recording and management CLI with real-time dB level metering.
+Audio recording toolkit with a Python CLI (desktop/Linux) and a Jetpack Compose Android client. Both record in timed chunks, upload to S3-compatible storage, and can publish PawnQueue jobs for transcription/diarization.
 
 ## Features
+
+### Python CLI
 
 - Real-time audio level monitoring with visual dB meter
 - Support for multiple audio devices and drivers (PulseAudio, ALSA, JACK, USB)
@@ -11,6 +13,16 @@ A Python audio recording and management CLI with real-time dB level metering.
 - Input gain control
 - Interactive device selection
 - **Local JSONL recording log** – per-session and per-chunk metadata (device, duration, S3 status) persisted alongside audio files
+
+### Android client
+
+- Foreground-service recording with VU meter
+- Timed chunking (default 120 s) plus force-upload of the current chunk
+- FLAC (default, libFLAC via NDK) or WAV encoding
+- In-app settings for recording, S3, and PawnQueue (same contract as `.pawnai-recorder.yml`)
+- Kotlin PawnQueue publishing for `transcribe-diarize` / `analyze` / `sync-siyuan`
+
+See [`android/README.md`](android/README.md) for build and NDK details.
 
 ## Installation
 
@@ -280,17 +292,31 @@ for line in sys.stdin:
 **Configure the log filename permanently** in `.pawnai-recorder.yml`
 (see [Configuration](#configuration)).
 
-
-## Android client
-
-See [`android/`](android/) for the Jetpack Compose recording client (S3 upload + Kotlin PawnQueue from `pawnai-sqs/kotlin`).
-
-
 You can also run the application as a Python module:
 
 ```bash
 python -m pawnai_recorder record
 ```
+
+## Android client
+
+The Android app under [`android/`](android/) is a Jetpack Compose client that mirrors the CLI pipeline: record → chunk → S3 upload → optional PawnQueue jobs.
+
+### Build
+
+```bash
+cd android
+./gradlew :template:assembleDebug
+./gradlew :template:test
+```
+
+Requires Android SDK (`local.properties` → `sdk.dir=...`). FLAC encoding needs the NDK and CMake; see [`android/README.md`](android/README.md).
+
+### Configure
+
+Open **Settings** in the app and set recording, S3, and queue fields to match `.pawnai-recorder.yml` (bucket, endpoint, credentials, topic, job options). Choose file format `flac` or `wav` in the same screen.
+
+Full feature list and native FLAC notes: [`android/README.md`](android/README.md).
 
 ## Project Structure
 
@@ -310,10 +336,14 @@ pawnai-recorder/
 │   │   ├── storage.py
 │   │   └── processing.py
 │   └── utils/
+├── android/                  # Jetpack Compose recording client
+│   ├── README.md
+│   └── template/             # App module (UI, service, FLAC JNI)
 ├── audio/                    # Default output directory for recordings
 │   └── recordings.jsonl      # Auto-created recording log
 ├── docs/
 ├── tests/
+├── .pawnai-recorder.yml.example
 ├── pyproject.toml
 ├── setup.py
 ├── requirements.txt
