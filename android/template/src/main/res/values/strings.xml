@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">PawnAI Recorder</string>
+    <string name="recording_notification_title">Recording</string>
+    <string name="recording_notification_text">Capturing audio for PawnAI</string>
+    <string name="recording_channel_name">Recording</string>
+    <string name="recording_channel_description">Ongoing audio recording status</string>
+</resources>
