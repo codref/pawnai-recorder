@@ -132,6 +132,7 @@ def test_end_of_session_publishes_every_path_and_the_full_attachment_set():
 
 
 def test_session_offset_is_cumulative_and_restart_keeps_notes(tmp_path):
+    import datetime
     import time
 
     from pawnai_recorder.core.jobs import format_session_offset
@@ -206,9 +207,14 @@ def test_session_offset_is_cumulative_and_restart_keeps_notes(tmp_path):
     assert [note.text for note in notes] == ["keep"]
     assert live._chunks[1]["file_path"] == "old_01.flac"
     live._take_started = time.monotonic() - 9
+    live._chunk_wall_start = datetime.datetime.now().astimezone() - datetime.timedelta(seconds=9)
     fresh = live.add_note("later")
-    assert fresh.at.startswith("00:4")
+    assert "T" in fresh.at
     assert fresh.offset_sec >= 48
+    # (at - chunk start) is the session offset, which is what Pawn displays.
+    parsed = datetime.datetime.fromisoformat(fresh.at)
+    delta = (parsed - live._chunk_wall_start).total_seconds()
+    assert abs(delta - fresh.offset_sec) < 1.5
 
 
 def test_force_flush_emits_partial_buffer_once(tmp_path):

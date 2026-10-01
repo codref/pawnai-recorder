@@ -151,8 +151,13 @@ def run_session_ui(session, duration: Optional[float] = None) -> None:
 
             note_lines = ["Notes"]
             if snap["notes"]:
+                from pawnai_recorder.core.jobs import format_session_offset
                 for note in snap["notes"]:
-                    note_lines.append(f"{note['at']}  {note['text']}")
+                    if note.get("offset_sec") is not None:
+                        stamp = format_session_offset(note["offset_sec"])
+                    else:
+                        stamp = note["at"]
+                    note_lines.append(f"{stamp}  {note['text']}")
             else:
                 note_lines.append("Type a note and press Enter")
             if snap["screenshots"]:

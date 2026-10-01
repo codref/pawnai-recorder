@@ -28,7 +28,7 @@ taken since the previous publish.
   "session": "my-session-label",
   "device": "cpu",
   "annotations": [
-    {"id": "ab12", "at": "00:48.20", "offset_sec": 48.2, "text": "decision: ship v2"}
+    {"id": "ab12", "at": "2026-10-01T22:10:48+02:00", "offset_sec": 48.2, "text": "decision: ship v2"}
   ],
   "screenshots": [
     {
@@ -42,13 +42,13 @@ taken since the previous publish.
 }
 ```
 
-`id` is a stable hex string. `at` is the offset from the start of the whole
-recording session (`MM:SS.ss`), including audio from earlier pause/resume
-cycles. It is not the offset within the current chunk. `offset_sec` is that
-same session offset in seconds; use it when placing the note on the
-transcript timeline. `region` is reserved for a future crop and is `null`
-today. `s3_uri` may be `null` when the recorder saved the PNG locally but
-upload failed.
+`id` is a stable hex string. `at` is an ISO-8601 timestamp. It is anchored
+so that `at` minus the current chunk's start time equals `offset_sec`, the
+position in the whole session (pause/resume included), not the position
+inside that chunk. Place the note with `offset_sec`. A non-ISO `at` is
+ignored by the current transcript writer, so `at` must stay a datetime.
+`region` is reserved for a future crop and is `null` today. `s3_uri` may be
+`null` when the recorder saved the PNG locally but upload failed.
 
 A note typed after the last per-chunk publish, with no further audio flushed,
 stays in the recorder JSONL log and is not sent. The usual stop path flushes

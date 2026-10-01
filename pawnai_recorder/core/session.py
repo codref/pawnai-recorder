@@ -13,6 +13,7 @@ import queue
 import subprocess
 import threading
 import time
+from datetime import timedelta
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -362,6 +363,7 @@ class RecordingSession:
         self._running = threading.Event()
         self._take_started: Optional[float] = None
         self._recorded_sec = 0.0
+        self._chunk_wall_start: Optional[datetime.datetime] = None
         self._chunk_count = 0
         self._shot_index = 0
         self._shot_stop: Optional[threading.Event] = None
@@ -481,6 +483,7 @@ class RecordingSession:
             self._backend = None
             self._notify()
             raise
+        self._chunk_wall_start = datetime.datetime.now().astimezone()
         self._take_started = time.monotonic()
         self._running.set()
         self._start_shot_timer()
@@ -533,9 +536,14 @@ class RecordingSession:
         if not self.is_recording:
             raise RuntimeError("not recording")
         offset = self.elapsed_sec()
+        # Pawn reads `at` as an ISO time and places the note at (at - chunk start).
+        # Anchoring on the current chunk start makes that difference the session
+        # offset, not the offset inside this chunk. A bare MM:SS string is dropped.
+        anchor = self._chunk_wall_start or datetime.datetime.now().astimezone()
+        at_iso = (anchor + timedelta(seconds=offset)).replace(microsecond=0).isoformat()
         note = self._attachments.add_note(
             cleaned,
-            at=format_session_offset(offset),
+            at=at_iso,
             offset_sec=offset,
         )
         self.recording_logger.write_note(
@@ -666,6 +674,8 @@ class RecordingSession:
 
     def _on_chunk(self, info: dict) -> None:
         index = int(info["index"])
+        if info.get("status") == "saving":
+            self._chunk_wall_start = datetime.datetime.now().astimezone()
         with self._state_lock:
             self._chunks[index] = dict(info)
             if index > self._chunk_count:
