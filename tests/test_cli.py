@@ -7,6 +7,28 @@ from pawnai_recorder.cli import app
 runner = CliRunner()
 
 
+def test_record_help_lists_session_flags():
+    """The live-session flags are part of record --help."""
+    result = runner.invoke(app, ["record", "--help"])
+    assert result.exit_code == 0
+    for flag in ("--diarize-mode", "--plain", "--no-tray", "--screenshot-output", "--screenshot-every"):
+        assert flag in result.stdout
+
+
+def test_record_rejects_unknown_diarize_mode(tmp_path, monkeypatch):
+    """A bad --diarize-mode exits before opening an audio device."""
+    monkeypatch.chdir(tmp_path)
+    from pawnai_recorder.cli import commands
+
+    commands.app_config = commands.AppConfig()
+    result = runner.invoke(
+        app,
+        ["record", "--diarize-mode", "sometimes", "--plain", "--no-tray"],
+    )
+    assert result.exit_code != 0
+    assert "diarize mode" in result.stdout
+
+
 def test_list_devices_command():
     """Test list-devices command."""
     result = runner.invoke(app, ["list-devices"])

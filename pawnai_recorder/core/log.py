@@ -18,6 +18,12 @@ Record types
     Written once when a recording run finishes with total duration and final
     chunk count.
 
+``note``
+    Written when the operator adds a realtime annotation during the session.
+
+``screenshot``
+    Written when a screen capture is saved for the session.
+
 Example log lines::
 
     {"type":"session","event":"start","session_id":"260223143022","conversation_id":"mtg-01","device_id":3,"device_name":"USB PnP Audio Device","sample_rate":16000,"channels":1,"format":"flac","started_at":"2026-02-23T14:30:22"}
@@ -143,6 +149,45 @@ class RecordingLogger:
             "ended_at": _iso(ended_at),
             "total_duration_sec": round(total_duration_sec, 3),
             "chunk_count": chunk_count,
+        })
+
+    def write_note(
+        self,
+        session_id: str,
+        note_id: str,
+        at: str,
+        text: str,
+    ) -> None:
+        """Append a realtime note taken while recording."""
+        self._append({
+            "type": "note",
+            "session_id": session_id,
+            "id": note_id,
+            "at": at,
+            "text": text,
+        })
+
+    def write_screenshot(
+        self,
+        session_id: str,
+        shot_id: str,
+        at: str,
+        file_path: str,
+        output: str,
+        s3_object_key: Optional[str] = None,
+        s3_uri: Optional[str] = None,
+    ) -> None:
+        """Append a screenshot record."""
+        self._append({
+            "type": "screenshot",
+            "session_id": session_id,
+            "id": shot_id,
+            "at": at,
+            "file_path": file_path,
+            "output": output,
+            "region": None,
+            "s3_object_key": s3_object_key,
+            "s3_uri": s3_uri,
         })
 
     # ------------------------------------------------------------------

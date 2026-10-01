@@ -47,7 +47,6 @@ queue:
   producer_name: pawnai-recorder
 
   # ── transcribe-diarize command ─────────────────────────────────────────
-  # Published once per uploaded audio chunk.
   # Omit this block to use the consumer-side defaults.
   transcribe_diarize:
     # When to publish the transcribe-diarize command.
@@ -90,5 +89,7 @@ log:
   # Each completed recording session appends three record types:
   #   session (event=start) - device, sample_rate, format, conversation_id
   #   chunk                 - file_path, duration_sec, s3_object_key, s3_uploaded
+  #   note                  - id, at, text (realtime annotation)
+  #   screenshot            - id, at, file_path, output, s3_uri
   #   session (event=end)   - total_duration_sec, chunk_count
   file: "recordings.jsonl"

@@ -15,13 +15,10 @@ import typer
 from loguru import logger
 from rich.live import Live
 from rich.panel import Panel
+from rich.markup import escape
 from rich.prompt import IntPrompt
-from rich.table import Table
 
-from pawnai_recorder.core import (
-    MicrophoneStream,
-    RecordingEngine,
-)
+from pawnai_recorder.core.recording import RecordingEngine, first_openable_input
 from pawnai_recorder.core.queue_producer import SessionQueueProducer
 from pawnai_recorder.core.s3_upload import S3Uploader
 from pawnai_recorder.core.config import (
@@ -84,6 +81,121 @@ def list_sinks(
         title="[bold]Available Output Sinks[/bold]",
         subtitle="[dim]Pass the Monitor Source value to: pawnai-recorder record --sink <monitor>[/dim]",
     ))
+
+
+def _prompt_input_device(driver: Optional[str], verbose: bool) -> int:
+    """Ask for an input device id. Exits the process when the choice is invalid."""
+    if verbose:
+        devices = RecordingEngine.list_devices(driver_filter=driver)
+    else:
+        with suppress_stderr():
+            devices = RecordingEngine.list_devices(driver_filter=driver)
+    if not devices:
+        console.print(
+            "[error]✗ No input devices found"
+            + (f" for driver: {driver}" if driver else "")
+            + "[/error]"
+        )
+        raise SystemExit(1)
+
+    title = "Available Input Devices"
+    if driver:
+        title += f" (filtered by: {driver})"
+    console.print(Panel(make_device_table(devices), title=f"[bold]{title}[/bold]"))
+
+    input_device_ids = [d["id"] for d in devices]
+    try:
+        import pyaudio
+
+        if verbose:
+            audio = pyaudio.PyAudio()
+        else:
+            with suppress_stderr():
+                audio = pyaudio.PyAudio()
+        try:
+            default_device = audio.get_default_input_device_info()
+            portaudio_default = int(default_device["index"]) if default_device else -1
+        except OSError:
+            portaudio_default = input_device_ids[0] if input_device_ids else 0
+        if portaudio_default not in input_device_ids:
+            portaudio_default = input_device_ids[0] if input_device_ids else 0
+        audio.terminate()
+        with suppress_stderr():
+            default_device_id = first_openable_input(devices, portaudio_default)
+        if default_device_id is None:
+            console.print(
+                "[error]✗ None of the listed input devices could be opened. "
+                "Check that PipeWire or PulseAudio is running.[/error]"
+            )
+            raise SystemExit(1)
+        if default_device_id != portaudio_default:
+            suggested = next(d["name"] for d in devices if d["id"] == default_device_id)
+            console.print(
+                f"[dim]Device {portaudio_default} cannot be opened; "
+                f"suggesting {default_device_id} ({escape(suggested)}).[/dim]"
+            )
+        chosen = IntPrompt.ask(
+            "📍 Select device ID",
+            console=console,
+            default=default_device_id,
+        )
+        if chosen not in input_device_ids:
+            console.print(f"[error]✗ Invalid device ID: {chosen}[/error]")
+            raise SystemExit(1)
+        return chosen
+    except ValueError:
+        console.print("[error]✗ Invalid input[/error]")
+        raise SystemExit(1) from None
+
+
+def _use_session_window(plain: bool) -> bool:
+    """Open the Textual window on an interactive terminal when the package is installed."""
+    if plain or not sys.stdout.isatty():
+        return False
+    try:
+        import textual  # noqa: F401
+    except ImportError:
+        console.print(
+            "[warning]textual is not installed; using the plain meter. "
+            "pip install 'pawnai-recorder\\[ui\\]'[/warning]"
+        )
+        return False
+    return True
+
+
+def _run_plain(live, duration: Optional[int], quit_event: threading.Event) -> None:
+    """Rich level meter. Ctrl+C, ``--duration``, or the tray Quit item ends the command."""
+    try:
+        info = live.start()
+    except Exception as exc:
+        console.print(f"[error]✗ Error during recording: {escape(str(exc))}[/error]")
+        raise SystemExit(1) from exc
+
+    duration_str = f"{duration}s" if duration else "continuous — Ctrl+C to stop"
+    console.print(Panel(
+        f"[dim]Session:[/dim]  {info.get('session_id')}\n"
+        f"[dim]Device:[/dim]   {info.get('device_name')}\n"
+        f"[dim]Diarize:[/dim]  {live.diarize_mode}\n"
+        f"[dim]Duration:[/dim] {duration_str}",
+        title="[bold]🎙 Recording Session[/bold]",
+        border_style="green",
+    ))
+    started = time.time()
+    try:
+        with make_level_progress() as progress:
+            task = progress.add_task("level", total=120, db_text="-- dB")
+            while not quit_event.is_set():
+                live.drain_audio_ops()
+                if duration is not None and (time.time() - started) >= duration:
+                    break
+                db_level = live.db_level()
+                progress.update(task, completed=db_level, db_text=f"{db_level:.1f} dB")
+                time.sleep(0.1)
+    except KeyboardInterrupt:
+        console.print("\n[warning]⏹ Recording interrupted by user[/warning]")
+    if live.is_recording:
+        live.stop()
+        console.print("[success]✓ Recording stopped[/success]")
 
 
 @app.command()
@@ -152,6 +264,37 @@ def record(
             "Defaults to the value from .pawnai-recorder.yml or 'recordings.jsonl'."
         ),
     ),
+    diarize_mode: Optional[str] = typer.Option(
+        None,
+        "--diarize-mode",
+        help=(
+            "When to publish transcribe-diarize: per_chunk (after every chunk upload) "
+            "or end_of_session (one message when the take stops). Overrides the YAML mode."
+        ),
+    ),
+    plain: bool = typer.Option(
+        False,
+        "--plain",
+        help="Use the Rich level meter instead of the session window.",
+    ),
+    tray: bool = typer.Option(
+        True,
+        "--tray/--no-tray",
+        help="Show a Linux status-bar icon while this command is running.",
+    ),
+    screenshot_output: Optional[str] = typer.Option(
+        None,
+        "--screenshot-output",
+        help=(
+            "Enable screen capture of this monitor. Use a Wayland output name "
+            "(for example DP-1) or a monitor index starting at 0."
+        ),
+    ),
+    screenshot_every: Optional[float] = typer.Option(
+        None,
+        "--screenshot-every",
+        help="Seconds between automatic screenshots. Omit for manual capture only.",
+    ),
 ):
     """Start a new audio recording."""
     # Configure loguru log level based on verbose flag
@@ -190,399 +333,76 @@ def record(
 
     # Job-level config for structured queue payloads (transcribe-diarize, analyze)
     _queue_job_config = app_config.get_queue_job_config()
-
-    # ------------------------------------------------------------------
-    # OUTPUT SINK path: capture via parec <sink>.monitor
-    # ------------------------------------------------------------------
-    if sink is not None:
-        import datetime as _dt
-        import soundfile as sf
-
-        # Normalise: accept either "alsa_output.xxx" or "alsa_output.xxx.monitor"
-        monitor_source = sink if sink.endswith(".monitor") else f"{sink}.monitor"
-
-        output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
-
-        # Session ID: apply the same timestamp_format template as the mic path
-        _now = _dt.datetime.now()
-        _ts_str = _now.strftime(datetime_format)
-        session_id = timestamp_format.format(ts=_ts_str, device_id="default")
-
-        # ------------------------------------------------------------------
-        # Initialise optional S3 uploader (same logic as MicrophoneStream)
-        # ------------------------------------------------------------------
-        _uploader = None
-        if upload:
-            try:
-                _s3_cfg = app_config.get_s3_config()
-                if _s3_cfg:
-                    _uploader = S3Uploader.from_dict(_s3_cfg)
-                else:
-                    console.print("[dim]S3 upload: no config in .pawnai-recorder.yml — skipping[/dim]")
-            except Exception as _e:
-                console.print(f"[warning]S3 init failed: {_e}[/warning]")
-
-        # Each parec read is exactly one second of audio at the requested rate.
-        # We accumulate chunk_size reads before closing the file — identical semantics
-        # to the microphone path where chunk_size counts PyAudio callbacks.
-        _read_bytes = rate * 2  # s16le → 2 bytes per sample; 1 second per read
-        _read_buf: list = []    # accumulated np.int16 arrays for current chunk
-        _read_count = 0          # reads accumulated so far
-        _chunk_count = 0
-        _total_frames = 0
-        _chunk_started_at = _now
-        _start_time = time.time()
-
-        # Each read = 1 s, so chunk_size reads = chunk_size seconds per file
-        _chunk_sec = chunk_size
-
-        gain_str = f"{gain:.2f}x"
-        if gain != 1.0:
-            gain_str += f" ({20 * np.log10(gain):+.1f} dB)"
-        upload_str = "[green]enabled[/green]" if _uploader else "[yellow]disabled[/yellow]"
-
-        # Accumulates S3 object URIs; flushed in one transcribe-diarize message
-        # at session end when mode == 'end_of_session' (default).
-        _sink_s3_keys: list = []
-
-        console.print(Panel(
-            f"[dim]Monitor:[/dim]    {monitor_source}\n"
-            f"[dim]Session:[/dim]    {session_id}\n"
-            f"[dim]Rate:[/dim]       {rate} Hz  |  [dim]Format:[/dim] {format.upper()}\n"
-            f"[dim]Chunk size:[/dim] {chunk_size} reads ≈ {_chunk_sec:.0f} s/file\n"
-            f"[dim]Gain:[/dim]       {gain_str}\n"
-            f"[dim]Upload:[/dim]     {upload_str}\n"
-            f"[dim]Duration:[/dim]   {f'{duration}s' if duration else 'continuous — Ctrl+C to stop'}",
-            title="[bold]🔊 Recording Output Sink[/bold]",
-            border_style="magenta",
-        ))
-
-        parec_cmd = [
-            "parec",
-            f"--device={monitor_source}",
-            "--format=s16le",
-            f"--rate={rate}",
-            "--channels=1",
-            "--latency-msec=50",
-        ]
-        try:
-            proc = subprocess.Popen(parec_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        except FileNotFoundError:
-            console.print("[error]✗ parec not found — install pulseaudio-utils[/error]")
-            sys.exit(1)
-
-        # Log session start
-        recording_logger.write_session_start(
-            session_id=session_id,
-            conversation_id=conversation_id,
-            device_id=None,
-            device_name=monitor_source,
-            sample_rate=rate,
-            channels=1,
-            format=format,
-            started_at=_now,
-        )
-
-        def _flush_chunk(buf: list, idx: int, started_at: _dt.datetime) -> None:
-            """Save *buf* arrays to a chunk file, upload, and log."""
-            nonlocal _total_frames
-            if not buf:
-                return
-            chunk_file = output_path / f"{session_id}_{idx:02d}.{format}"
-            audio_arr = np.concatenate(buf)  # int16
-            if gain != 1.0:
-                audio_arr = np.clip(
-                    audio_arr.astype(np.float32) * gain, -32768, 32767
-                ).astype(np.int16)
-            audio_float = audio_arr.astype(np.float32) / 32768.0
-            sf.write(str(chunk_file), audio_float, rate, subtype="PCM_16")
-            dur_sec = len(audio_arr) / rate
-            _total_frames += len(audio_arr)
-
-            # S3 upload
-            s3_key: Optional[str] = None
-            s3_ok = False
-            if _uploader:
-                try:
-                    s3_key = _uploader.upload_file(
-                        local_path=str(chunk_file),
-                        session_id=session_id,
-                        conversation_id=conversation_id,
-                    )
-                    s3_ok = True
-                    console.print(f"[dim]⬆  Uploaded chunk {idx}: {s3_key}[/dim]")
-                    if _queue_producer is not None:
-                        _td = _queue_job_config.get('transcribe_diarize', {})
-                        _td_mode = _td.get('mode', 'end_of_session')
-                        if _td_mode == 'per_chunk':
-                            _session_val = session if session is not None else session_id
-                            _queue_producer.publish({
-                                "command": "transcribe-diarize",
-                                "audio_paths": [f"s3://{_uploader.bucket}/{s3_key}"],
-                                "threshold": _td.get('threshold', 0.2),
-                                "cross_file_threshold": _td.get('cross_file_threshold', 0.2),
-                                "session": _session_val,
-                                "device": _td.get('device', 'cpu'),
-                            })
-                        else:
-                            # end_of_session (default): accumulate for a single message at session end
-                            _sink_s3_keys.append(f"s3://{_uploader.bucket}/{s3_key}")
-                except Exception as _ue:
-                    console.print(f"[warning]Upload failed for chunk {idx}: {_ue}[/warning]")
-
-            # JSONL log
-            recording_logger.write_chunk(
-                session_id=session_id,
-                chunk_index=idx,
-                file_path=str(chunk_file),
-                started_at=started_at,
-                duration_sec=dur_sec,
-                s3_object_key=s3_key,
-                s3_uploaded=s3_ok,
-            )
-            console.print(f"[dim]💾 Saved chunk {idx}: {chunk_file} ({dur_sec:.1f} s)[/dim]")
-
-        try:
-            with make_level_progress() as progress:
-                task = progress.add_task("level", total=120, db_text="-- dB")
-                while True:
-                    if duration and (time.time() - _start_time) >= duration:
-                        break
-                    data = proc.stdout.read(_read_bytes)
-                    if not data:
-                        break
-                    audio_chunk = np.frombuffer(data, dtype=np.int16).copy()
-                    _read_buf.append(audio_chunk)
-                    _read_count += 1
-
-                    # Level meter (on raw, pre-gain signal for display)
-                    rms = np.sqrt(np.mean(audio_chunk.astype(float) ** 2))
-                    db = max(0.0, min(120.0, 20 * np.log10(rms / 32768) + 120)) if rms > 0 else 0.0
-                    progress.update(task, completed=db, db_text=f"{db:.1f} dB")
-
-                    # Flush when we have accumulated chunk_size reads
-                    if _read_count >= chunk_size:
-                        _chunk_count += 1
-                        _flush_chunk(_read_buf[:], _chunk_count, _chunk_started_at)
-                        _read_buf = []
-                        _read_count = 0
-                        _chunk_started_at = _dt.datetime.now()
-
-        except KeyboardInterrupt:
-            console.print("\n[warning]⏹ Recording interrupted by user[/warning]")
-        finally:
-            proc.terminate()
-
-        # Save any remaining frames that did not fill a full chunk
-        if _read_buf:
-            _chunk_count += 1
-            _flush_chunk(_read_buf, _chunk_count, _chunk_started_at)
-
-        # Log session end
-        recording_logger.write_session_end(
-            session_id=session_id,
-            total_duration_sec=_total_frames / rate,
-            chunk_count=_chunk_count,
-        )
-
-        console.print(
-            f"[success]✓ Recorded {_total_frames / rate:.1f} s in {_chunk_count} chunk(s)[/success]"
-        )
-        if _queue_producer is not None:
-            _end_session = session if session is not None else session_id
-            # End-of-session transcribe-diarize: one message covering all chunks,
-            # published just before analyze so the pipeline receives the full context.
-            _td = _queue_job_config.get('transcribe_diarize', {})
-            if _td.get('mode', 'end_of_session') == 'end_of_session' and _sink_s3_keys:
-                _queue_producer.publish({
-                    "command": "transcribe-diarize",
-                    "audio_paths": list(_sink_s3_keys),
-                    "threshold": _td.get('threshold', 0.2),
-                    "cross_file_threshold": _td.get('cross_file_threshold', 0.2),
-                    "session": _end_session,
-                    "device": _td.get('device', 'cpu'),
-                })
-            _an = _queue_job_config.get('analyze')
-            if _an is not None:
-                _queue_producer.publish({
-                    "command": "analyze",
-                    "session": _end_session,
-                    "mode": _an.get('mode', 'summary'),
-                    "model": _an.get('model', 'gpt-4o'),
-                })
-            if _queue_job_config.get('sync_siyuan') is not None:
-                _queue_producer.publish({
-                    "command": "sync-siyuan",
-                    "session": _end_session,
-                })
-            _queue_producer.close()
-        return
-
-    # ------------------------------------------------------------------
-    # Normal INPUT (microphone) path
-    # ------------------------------------------------------------------
-    # List devices and get user selection if not specified
-    if device_id is None:
-        if verbose:
-            devices = RecordingEngine.list_devices(driver_filter=driver)
-        else:
-            with suppress_stderr():
-                devices = RecordingEngine.list_devices(driver_filter=driver)
-        if not devices:
-            console.print(
-                "[error]✗ No input devices found"
-                + (f" for driver: {driver}" if driver else "")
-                + "[/error]"
-            )
-            sys.exit(1)
-
-        title = "Available Input Devices"
-        if driver:
-            title += f" (filtered by: {driver})"
-        console.print(Panel(make_device_table(devices), title=f"[bold]{title}[/bold]"))
-
-        input_device_ids = [d['id'] for d in devices]
-        try:
-            import pyaudio
-
-            if verbose:
-                audio = pyaudio.PyAudio()
-            else:
-                with suppress_stderr():
-                    audio = pyaudio.PyAudio()
-            default_device = audio.get_default_input_device_info()
-            default_device_id = int(default_device['index']) if default_device else -1
-            if default_device_id not in input_device_ids:
-                default_device_id = input_device_ids[0] if input_device_ids else 0
-            audio.terminate()
-            device_id = IntPrompt.ask(
-                "📍 Select device ID",
-                console=console,
-                default=default_device_id,
-            )
-            if device_id not in input_device_ids:
-                console.print(f"[error]✗ Invalid device ID: {device_id}[/error]")
-                sys.exit(1)
-        except ValueError:
-            console.print("[error]✗ Invalid input[/error]")
-            sys.exit(1)
-
-    stream = None
-    _mic_session_value: Optional[str] = None
-
-    def signal_handler(sig, frame):
-        console.print("\n[warning]⏹ Received interrupt signal, stopping recording...[/warning]")
-        if stream:
-            stream.stop_recording()
-        # Give threads time to finish saving
-        time.sleep(1)
-        sys.exit(0)
-
-    import signal
-
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-
+    live = None
+    tray_icon = None
     try:
-        stream = MicrophoneStream(
-            rate=rate,
+        if diarize_mode is not None:
+            from pawnai_recorder.core.jobs import resolve_diarize_mode, with_diarize_mode
+
+            try:
+                resolve_diarize_mode(_queue_job_config, diarize_mode)
+            except ValueError as exc:
+                console.print(f"[error]✗ {exc}[/error]")
+                raise SystemExit(1) from exc
+            _queue_job_config = with_diarize_mode(_queue_job_config, diarize_mode)
+
+        if sink is None and device_id is None:
+            device_id = _prompt_input_device(driver, verbose)
+
+        from pawnai_recorder.core.session import RecordingSession
+
+        live = RecordingSession(
             output_dir=output_dir,
+            rate=rate,
             chunk_size=chunk_size,
-            device_id=device_id,
-            show_level_meter=True,
-            gain_factor=gain,
             file_format=format,
+            gain=gain,
+            device_id=device_id,
+            sink=sink,
             conversation_id=conversation_id,
             upload_enabled=upload,
             verbose=verbose,
             timestamp_format=timestamp_format,
             datetime_format=datetime_format,
+            session_label=session,
             recording_logger=recording_logger,
             queue_producer=_queue_producer,
-            session_label=session,
             queue_job_config=_queue_job_config,
+            screenshot_output=screenshot_output,
+            screenshot_every=screenshot_every,
         )
-        if verbose:
-            session_info = stream.start_recording()
+
+        quit_event = threading.Event()
+        live.request_quit = quit_event.set
+
+        import signal
+
+        def _on_term(signum, frame):
+            live.quit()
+
+        signal.signal(signal.SIGTERM, _on_term)
+
+        if tray:
+            from pawnai_recorder.desktop.tray import start_tray
+
+            tray_icon = start_tray(live)
+
+        if _use_session_window(plain):
+            from pawnai_recorder.cli.session_ui import run_session_ui
+
+            run_session_ui(live, duration=float(duration) if duration else None)
         else:
-            with suppress_stderr():
-                session_info = stream.start_recording()
-
-        _mic_session_value = session if session is not None else session_info['session_id']
-
-        # Build and display session summary Panel
-        upload_str = "[green]enabled[/green]" if upload else "[yellow]bypassed (--no-upload)[/yellow]"
-        gain_str = f"{gain:.2f}x"
-        if gain != 1.0 and gain > 0:
-            gain_str += f" ({20 * np.log10(gain):+.1f} dB)"
-        duration_str = f"{duration}s" if duration else "continuous — Ctrl+C to stop"
-
-        info_grid = Table.grid(padding=(0, 1))
-        info_grid.add_column(style="dim", justify="right")
-        info_grid.add_column()
-        info_grid.add_row("Session ID:", session_info['session_id'])
-        info_grid.add_row("Device:", f"{session_info['device_name']} (ID: {session_info['device_id']})")
-        info_grid.add_row("Sample Rate:", f"{session_info['sample_rate']} Hz")
-        info_grid.add_row("Format:", format.upper())
-        if gain != 1.0:
-            info_grid.add_row("Gain:", gain_str)
-        info_grid.add_row("Upload:", upload_str)
-        info_grid.add_row("Duration:", duration_str)
-        info_grid.add_row("Output:", session_info['output_dir'])
-        info_grid.add_row("Log:", str(_log_path))
-        console.print(Panel(info_grid, title="[bold]🎙 Recording Session[/bold]", border_style="green"))
-
-        if duration:
-            start_time = time.time()
-            with make_level_progress() as progress:
-                task = progress.add_task("level", total=120, db_text="-- dB")
-                while time.time() - start_time < duration:
-                    db_level = stream.get_current_db_level()
-                    progress.update(task, completed=db_level, db_text=f"{db_level:.1f} dB")
-                    time.sleep(0.1)
-            stream.stop_recording()
-            time.sleep(1.5)
-            console.print("[success]✓ Recording completed[/success]")
-        else:
-            console.rule("[bold]Real-time dB Level Meter[/bold] — Ctrl+C to stop")
-            with make_level_progress() as progress:
-                task = progress.add_task("level", total=120, db_text="-- dB")
-                while True:
-                    db_level = stream.get_current_db_level()
-                    progress.update(task, completed=db_level, db_text=f"{db_level:.1f} dB")
-                    time.sleep(0.1)
-
+            _run_plain(live, duration, quit_event)
     except KeyboardInterrupt:
-        console.print("[warning]⏹ Recording interrupted by user[/warning]")
-        if stream:
-            stream.stop_recording()
-            # Wait for background threads to finish saving
-            time.sleep(1.5)
-    except Exception as e:
-        console.print(f"[error]✗ Error during recording: {e}[/error]")
-        if stream:
-            stream.stop_recording()
-            # Wait for background threads to finish saving
-            time.sleep(1.5)
-        sys.exit(1)
+        console.print("\n[warning]⏹ Recording interrupted by user[/warning]")
     finally:
-        if _queue_producer is not None:
-            if _mic_session_value:
-                _an = _queue_job_config.get('analyze')
-                if _an is not None:
-                    _queue_producer.publish({
-                        "command": "analyze",
-                        "session": _mic_session_value,
-                        "mode": _an.get('mode', 'summary'),
-                        "model": _an.get('model', 'gpt-4o'),
-                    })
-                if _queue_job_config.get('sync_siyuan') is not None:
-                    _queue_producer.publish({
-                        "command": "sync-siyuan",
-                        "session": _mic_session_value,
-                    })
+        if tray_icon is not None:
+            tray_icon.stop()
+        if live is not None:
+            live.close()
+        elif _queue_producer is not None:
             _queue_producer.close()
+
 
 
 @app.command()

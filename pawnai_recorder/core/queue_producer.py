@@ -28,7 +28,15 @@ reused from the existing ``s3:`` section — no duplication required::
 
 Message flow per recording session
 -----------------------------------
-For every uploaded chunk a ``transcribe-diarize`` command is published::
+``transcribe_diarize.mode`` selects when the diarize command is published.
+``per_chunk`` sends one message after each uploaded chunk (best with short
+chunks). ``end_of_session`` (the default) sends one message with every chunk
+path when the take stops. Optional ``annotations`` and ``screenshots`` arrays
+ride on that message; they are omitted when empty. A per-chunk message
+carries only the notes and screenshots taken since the previous publish.
+The end-of-session message carries the full set.
+
+A ``transcribe-diarize`` command looks like::
 
     {
       "command": "transcribe-diarize",

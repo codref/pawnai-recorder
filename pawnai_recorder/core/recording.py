@@ -51,13 +51,16 @@ Examples::
     # files → audio/2023-10-15T143022_dev3_01.flac
 """
 
+import atexit
 import datetime
+import os
 import subprocess
 import tempfile
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 from threading import Thread
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 import pyaudio
@@ -80,6 +83,140 @@ from .config import AppConfig
 from .log import RecordingLogger
 from .queue_producer import SessionQueueProducer
 from .s3_upload import S3Uploader
+
+# PortAudio crashes if Pa_Initialize / Pa_Terminate run on different threads,
+# or if a second instance is created while the first is still shutting down.
+# One instance is created on the thread that first records and kept until exit.
+_pyaudio_lock = threading.Lock()
+_pyaudio_instance = None
+
+
+def shared_pyaudio():
+    """Return the process-wide PyAudio instance, creating it once."""
+    global _pyaudio_instance
+    with _pyaudio_lock:
+        if _pyaudio_instance is None:
+            _pyaudio_instance = pyaudio.PyAudio()
+        return _pyaudio_instance
+
+
+def _shutdown_pyaudio() -> None:
+    global _pyaudio_instance
+    with _pyaudio_lock:
+        instance = _pyaudio_instance
+        _pyaudio_instance = None
+    if instance is not None:
+        try:
+            instance.terminate()
+        except Exception:
+            pass
+
+
+atexit.register(_shutdown_pyaudio)
+
+# ALSA plugin names that PortAudio lists as inputs but that fail to open
+# under PipeWire. The real capture devices are "pulse" and the hardware input.
+_UNOPENABLE_INPUT_NAMES = frozenset({
+    "default",
+    "sysdefault",
+    "pipewire",
+    "lavrate",
+    "samplerate",
+    "speexrate",
+    "speex",
+    "upmix",
+    "vdownmix",
+})
+
+
+@contextmanager
+def quiet_stderr():
+    """Hide C-library noise on stderr (ALSA, JACK, PortAudio)."""
+    original_stderr_fd = os.dup(2)
+    try:
+        null_fd = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(null_fd, 2)
+            yield
+        finally:
+            os.close(null_fd)
+    finally:
+        os.dup2(original_stderr_fd, 2)
+        os.close(original_stderr_fd)
+
+
+def input_candidate_order(devices: list, preferred_id: Optional[int]) -> list:
+    """Order input device ids: preferred, then Pulse, then real hardware, then the rest.
+
+    The ALSA ``default`` plugin is often PortAudio's default and refuses to
+    open on PipeWire. Pulse and modest-channel hardware devices are tried next.
+    """
+    by_id = {device["id"]: device for device in devices}
+    ordered: list = []
+
+    def add(device_id: Optional[int]) -> None:
+        if device_id in by_id and device_id not in ordered:
+            ordered.append(device_id)
+
+    add(preferred_id)
+    for device in devices:
+        if str(device.get("name", "")).strip().lower() == "pulse":
+            add(device["id"])
+    for device in devices:
+        if device.get("driver") == "pulse":
+            add(device["id"])
+    for device in devices:
+        name = str(device.get("name", "")).strip().lower()
+        channels = int(device.get("channels") or 0)
+        if name not in _UNOPENABLE_INPUT_NAMES and 0 < channels <= 8:
+            add(device["id"])
+    for device in devices:
+        add(device["id"])
+    return ordered
+
+
+def first_openable_input(devices: list, preferred_id: Optional[int]) -> Optional[int]:
+    """Return the first input device id that accepts a mono capture stream."""
+    if not devices:
+        return None
+    audio = pyaudio.PyAudio()
+    try:
+        for device_id in input_candidate_order(devices, preferred_id):
+            try:
+                info = audio.get_device_info_by_index(device_id)
+            except OSError:
+                continue
+            rate = int(info.get("defaultSampleRate") or RATE)
+            try:
+                with quiet_stderr():
+                    stream = audio.open(
+                        format=pyaudio.paInt16,
+                        channels=1,
+                        rate=rate,
+                        input=True,
+                        input_device_index=device_id,
+                        frames_per_buffer=1024,
+                    )
+                stream.close()
+                return device_id
+            except OSError:
+                continue
+        return None
+    finally:
+        audio.terminate()
+
+
+def format_input_open_error(device_id, device_name: str, exc: BaseException) -> str:
+    """Explain a PortAudio open failure, including the usual PipeWire case."""
+    message = f"Could not open input {device_id} ({device_name}): {exc}."
+    if str(device_name).strip().lower() == "default":
+        message += (
+            " That ALSA device often fails under PipeWire;"
+            " choose pulse or the hardware input from list-devices."
+        )
+    else:
+        message += " Try another id from 'pawnai-recorder list-devices'."
+    return message
 
 
 class RecordingEngine:
@@ -229,6 +366,10 @@ class MicrophoneStream:
         queue_producer: Optional[SessionQueueProducer] = None,
         session_label: Optional[str] = None,
         queue_job_config: Optional[dict] = None,
+        uploader: Optional[S3Uploader] = None,
+        pipeline: Optional[object] = None,
+        on_chunk: Optional[Callable[[dict], None]] = None,
+        initial_chunk_index: int = 0,
     ) -> None:
         """Initialize the microphone stream.
 
@@ -283,26 +424,32 @@ class MicrophoneStream:
 
         self._audio_interface = None
         self._audio_stream = None
+        self._accepting = False
 
         self._recording_frames = []
-        self._count = 0
+        self._frames_lock = threading.Lock()
+        self._count = initial_chunk_index
         self._session_id = self._build_timestamp(device_id=device_id)
-        self._uploader: Optional[S3Uploader] = None
+        self._uploader: Optional[S3Uploader] = uploader
 
         # Recording logger and session tracking
         self._recording_logger = recording_logger
         self._queue_producer = queue_producer
         self._session_label = session_label
         self._queue_job_config = queue_job_config or {}
+        self._pipeline = pipeline
+        self._on_chunk = on_chunk
         self._session_started_at: Optional[datetime.datetime] = None
         self._total_duration_sec: float = 0.0
         self._save_lock = threading.Lock()
         self._saving_threads: list = []
         # S3 object keys collected across all chunks for the end-of-session
-        # transcribe-diarize message (used when mode == 'end_of_session').
+        # transcribe-diarize message (used when mode == 'end_of_session'
+        # and no shared ChunkPipeline was supplied).
         self._s3_upload_keys: list = []
 
-        self._initialize_uploader()
+        if uploader is None:
+            self._initialize_uploader()
 
         # Create output directory if it doesn't exist
         Path(self._output_dir).mkdir(parents=True, exist_ok=True)
@@ -348,27 +495,36 @@ class MicrophoneStream:
 
     def start_recording(self) -> None:
         """Start the recording stream."""
-        self._audio_interface = pyaudio.PyAudio()
+        from contextlib import nullcontext
 
-        # Get device info and use its native sample rate
-        device_info = self._audio_interface.get_device_info_by_index(self._device_id)
-        device_sample_rate = int(device_info.get('defaultSampleRate', self._rate))
-        device_name = device_info.get('name', 'Unknown')
+        silence = quiet_stderr() if not self._verbose else nullcontext()
+        device_name = str(self._device_id)
+        with silence:
+            self._audio_interface = shared_pyaudio()
+            self._accepting = True
+            try:
+                # Get device info and use its native sample rate
+                device_info = self._audio_interface.get_device_info_by_index(self._device_id)
+                device_sample_rate = int(device_info.get('defaultSampleRate', self._rate))
+                device_name = device_info.get('name', 'Unknown')
 
-        # Update the rate to match device's native rate
-        self._rate = device_sample_rate
-        self._session_started_at = datetime.datetime.now()
+                # Update the rate to match device's native rate
+                self._rate = device_sample_rate
+                self._session_started_at = datetime.datetime.now()
 
-        self._device_name = device_name
-        self._audio_stream = self._audio_interface.open(
-            format=self._sample_width,
-            channels=self._channel,
-            rate=self._rate,
-            input=True,
-            input_device_index=self._device_id,
-            frames_per_buffer=self._chunk,
-            stream_callback=self._fill_buffer,
-        )
+                self._device_name = device_name
+                self._audio_stream = self._audio_interface.open(
+                    format=self._sample_width,
+                    channels=self._channel,
+                    rate=self._rate,
+                    input=True,
+                    input_device_index=self._device_id,
+                    frames_per_buffer=self._chunk,
+                    stream_callback=self._fill_buffer,
+                )
+            except OSError as exc:
+                self._release_audio()
+                raise OSError(format_input_open_error(self._device_id, device_name, exc)) from exc
 
         if self._recording_logger is not None:
             self._recording_logger.write_session_start(
@@ -390,20 +546,33 @@ class MicrophoneStream:
             'output_dir': self._output_dir,
         }
 
+    def _release_audio(self) -> None:
+        """Close this capture stream. The shared PyAudio instance stays up.
+
+        Terminating PortAudio here segfaults when the next take starts, and
+        when stop runs on a different thread from the one that opened it.
+        """
+        self._accepting = False
+        stream = self._audio_stream
+        self._audio_stream = None
+        self._audio_interface = None
+        if stream is None:
+            return
+        try:
+            if stream.is_active():
+                stream.stop_stream()
+        except Exception:
+            pass
+        try:
+            stream.close()
+        except Exception:
+            pass
+
     def stop_recording(self) -> None:
         """Close the recording stream and save any remaining frames."""
-        if self._audio_stream:
-            self._audio_stream.stop_stream()
-            self._audio_stream.close()
-        if self._audio_interface:
-            self._audio_interface.terminate()
+        self._release_audio()
 
-        if self._recording_frames:
-            saving_frames = self._recording_frames[:]
-            self._recording_frames = []
-            self._count += 1
-
-            self._create_chunk_saving_thread(saving_frames, self._count)
+        self._flush_partial_buffer()
 
         # Wait for all chunk-saving threads to complete before writing session end
         with self._save_lock:
@@ -418,30 +587,60 @@ class MicrophoneStream:
                 chunk_count=self._count,
             )
 
-        # End-of-session transcribe-diarize: publish a single message covering
-        # all uploaded chunks now that the client has terminated the audio stream.
-        if self._queue_producer is not None and self._s3_upload_keys:
+        # End-of-session transcribe-diarize, after every chunk file is on disk.
+        if self._pipeline is not None:
+            self._pipeline.finish_transcription()
+        elif self._queue_producer is not None and self._s3_upload_keys:
+            from .jobs import DIARIZE_END_OF_SESSION, build_transcribe_diarize_payload
+
             _td = self._queue_job_config.get('transcribe_diarize', {})
-            if _td.get('mode', 'end_of_session') == 'end_of_session':
-                _session_val = (
-                    self._session_label
-                    if self._session_label is not None
-                    else self._session_id
-                )
-                self._queue_producer.publish({
-                    "command": "transcribe-diarize",
-                    "audio_paths": list(self._s3_upload_keys),
-                    "threshold": _td.get('threshold', 0.2),
-                    "cross_file_threshold": _td.get('cross_file_threshold', 0.2),
-                    "session": _session_val,
-                    "device": _td.get('device', 'cpu'),
-                })
+            if _td.get('mode', DIARIZE_END_OF_SESSION) == DIARIZE_END_OF_SESSION:
+                self._queue_producer.publish(build_transcribe_diarize_payload(
+                    session=self._session_value(),
+                    audio_paths=list(self._s3_upload_keys),
+                    transcribe_config=_td,
+                ))
                 logger.info(
                     f'End-of-session transcribe-diarize published '
                     f'({len(self._s3_upload_keys)} chunk(s))'
                 )
 
         logger.info('Microphone has been closed')
+
+    def force_flush(self) -> bool:
+        """Close the current buffer early, save it, and upload it.
+
+        Matches the Android "Force upload chunk" action. A no-op when the
+        buffer is empty.
+
+        Returns:
+            ``True`` when a partial chunk was handed to a save thread.
+        """
+        return self._flush_partial_buffer()
+
+    def _flush_partial_buffer(self) -> bool:
+        with self._frames_lock:
+            if not self._recording_frames:
+                return False
+            saving_frames = self._recording_frames[:]
+            self._recording_frames = []
+            self._count += 1
+            count = self._count
+        self._create_chunk_saving_thread(saving_frames, count)
+        return True
+
+    def _session_value(self) -> str:
+        if self._session_label is not None:
+            return self._session_label
+        return self._session_id
+
+    def _emit_chunk(self, info: dict) -> None:
+        if self._on_chunk is None:
+            return
+        try:
+            self._on_chunk(info)
+        except Exception as exc:
+            logger.warning(f'Chunk listener failed: {exc}')
 
     def _fill_buffer(
         self,
@@ -461,6 +660,9 @@ class MicrophoneStream:
         Returns:
             Tuple of (data, status_flag)
         """
+        if not self._accepting:
+            return None, pyaudio.paComplete
+
         # Apply gain to audio data
         processed_data = apply_gain(in_data, self._gain_factor)
 
@@ -468,13 +670,17 @@ class MicrophoneStream:
         if self._show_level_meter:
             self._current_db_level = calculate_db_level(processed_data, sample_width=2)
 
-        self._recording_frames.append(processed_data)
-        if len(self._recording_frames) >= self._chunk_size:
-            saving_frames = self._recording_frames[:]
-            self._recording_frames = []
-            self._count += 1
-
-            self._create_chunk_saving_thread(saving_frames, self._count)
+        saving_frames = None
+        count = 0
+        with self._frames_lock:
+            self._recording_frames.append(processed_data)
+            if len(self._recording_frames) >= self._chunk_size:
+                saving_frames = self._recording_frames[:]
+                self._recording_frames = []
+                self._count += 1
+                count = self._count
+        if saving_frames is not None:
+            self._create_chunk_saving_thread(saving_frames, count)
 
         return None, pyaudio.paContinue
 
@@ -485,6 +691,11 @@ class MicrophoneStream:
             Current dB level
         """
         return self._current_db_level
+
+    @property
+    def session_id(self) -> str:
+        """Timestamp session id used in filenames and queue messages."""
+        return self._session_id
 
     def _create_chunk_saving_thread(self, saving_frames, count):
         """Create a thread to save audio chunk asynchronously.
@@ -518,7 +729,15 @@ class MicrophoneStream:
         # Ensure output directory has trailing slash
         output_dir = self._output_dir if self._output_dir.endswith('/') else self._output_dir + '/'
         filename = f'{output_dir}{self._session_id}_{count:02}.{self._file_format}'
-        
+        self._emit_chunk({
+            "index": count,
+            "file_path": filename,
+            "status": "saving",
+            "duration_sec": 0.0,
+            "s3_object_key": None,
+            "error": None,
+        })
+
         try:
             # Convert byte frames to numpy audio array
             audio_data = np.frombuffer(b''.join(frames), dtype=np.int16)
@@ -548,33 +767,12 @@ class MicrophoneStream:
                     )
                     s3_uploaded = True
                     logger.info(f'Uploaded to S3: s3://{self._uploader.bucket}/{s3_object_key}')
-                    if self._queue_producer is not None:
-                        _td = self._queue_job_config.get('transcribe_diarize', {})
-                        _td_mode = _td.get('mode', 'end_of_session')
-                        if _td_mode == 'per_chunk':
-                            _session_val = (
-                                self._session_label
-                                if self._session_label is not None
-                                else self._session_id
-                            )
-                            self._queue_producer.publish({
-                                "command": "transcribe-diarize",
-                                "audio_paths": [
-                                    f"s3://{self._uploader.bucket}/{s3_object_key}"
-                                ],
-                                "threshold": _td.get('threshold', 0.2),
-                                "cross_file_threshold": _td.get('cross_file_threshold', 0.2),
-                                "session": _session_val,
-                                "device": _td.get('device', 'cpu'),
-                            })
-                        else:
-                            # end_of_session (default): accumulate; publish once at stop_recording
-                            with self._save_lock:
-                                self._s3_upload_keys.append(
-                                    f"s3://{self._uploader.bucket}/{s3_object_key}"
-                                )
+                    publish_status = self._publish_uploaded(s3_object_key)
                 except Exception as error:
                     logger.warning(f'Upload failed for {filename}: {error}')
+                    publish_status = "upload_failed"
+            else:
+                publish_status = "saved"
 
             if self._recording_logger is not None:
                 self._recording_logger.write_chunk(
@@ -587,9 +785,55 @@ class MicrophoneStream:
                     s3_uploaded=s3_uploaded,
                 )
 
+            status = "saved"
+            if s3_uploaded:
+                status = "diarize_published" if publish_status == "diarize_published" else "uploaded"
+            elif self._uploader and not s3_uploaded:
+                status = "upload_failed"
+            self._emit_chunk({
+                "index": count,
+                "file_path": filename,
+                "status": status,
+                "duration_sec": duration_sec,
+                "s3_object_key": s3_object_key,
+                "error": None if status != "upload_failed" else "upload failed",
+            })
+
             logger.info(f'Saved: {filename} ({len(frames)} frames)')
         except Exception as e:
             logger.error(f'Error saving {filename}: {e}')
+            self._emit_chunk({
+                "index": count,
+                "file_path": filename,
+                "status": "upload_failed",
+                "duration_sec": 0.0,
+                "s3_object_key": None,
+                "error": str(e),
+            })
+
+    def _publish_uploaded(self, object_key: str) -> str:
+        """Hand an uploaded object to the shared pipeline, or publish inline."""
+        if self._pipeline is not None:
+            return self._pipeline.on_uploaded(object_key)
+
+        if self._queue_producer is None or self._uploader is None:
+            return "accumulated"
+
+        from .jobs import DIARIZE_PER_CHUNK, build_transcribe_diarize_payload
+
+        td = self._queue_job_config.get('transcribe_diarize', {})
+        uri = f"s3://{self._uploader.bucket}/{object_key}"
+        if td.get('mode', 'end_of_session') == DIARIZE_PER_CHUNK:
+            self._queue_producer.publish(build_transcribe_diarize_payload(
+                session=self._session_value(),
+                audio_paths=[uri],
+                transcribe_config=td,
+            ))
+            return "diarize_published"
+
+        with self._save_lock:
+            self._s3_upload_keys.append(uri)
+        return "accumulated"
 
     def _save_mp3(self, filename: str, audio_data: np.ndarray) -> None:
         """Save audio data as MP3 file.

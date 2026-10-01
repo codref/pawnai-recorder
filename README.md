@@ -177,6 +177,46 @@ Both options can also be set permanently in `.pawnai-recorder.yml`
 pawnai-recorder record --device-id 0 --duration 30 --output ./recordings/ --gain 1.5
 ```
 
+### Per-chunk diarization
+
+`queue.transcribe_diarize.mode` in `.pawnai-recorder.yml` is `end_of_session` by default: one `transcribe-diarize` message is published when the take stops, with every chunk path. `per_chunk` publishes that message immediately after each chunk upload, which is the right choice for short chunks. The CLI flag overrides the file:
+
+```bash
+pawnai-recorder record --device-id 0 --chunk-size 30 --diarize-mode per_chunk
+```
+
+While a take is open, force the current buffer out (upload, and diarize when the mode is `per_chunk`) from the session window (`u`) or the status-bar menu **Force upload chunk**. That matches the Android client's force-upload action.
+
+### Session window, notes, and the status bar
+
+On a terminal, `record` opens a window (install the extra: `pip install -e ".[ui]"`). It shows the level, the chunk list, and a note field you can type in while recording. Enter attaches the note to the open take. The note is written to the JSONL log and, on the next `transcribe-diarize` publish, sent as an `annotations` entry. Pawn does not render those entries yet; see [`docs/PAWNAI_ANNOTATIONS_CONTRACT.md`](docs/PAWNAI_ANNOTATIONS_CONTRACT.md).
+
+Keys: `s` start/stop, `u` force-upload, `c` screenshot, `q` quit. Stopping returns to idle so you can start another take. Quit, and `--duration`, exit the process.
+
+`--plain` keeps the Rich level meter for scripts and non-interactive runs.
+
+```bash
+pawnai-recorder record --device-id 0 --plain --no-tray
+```
+
+A Linux status-bar icon is shown for the same process (a StatusNotifierItem). It uses the desktop icon theme: play while idle, pause while recording. Left click toggles recording. The right-click menu has Start, Stop, Force upload chunk, Take screenshot, and Quit. KDE, GNOME (with AppIndicator support), and waybar show it. `--no-tray` skips the icon. There is no Windows or macOS tray.
+
+### Screen capture
+
+Capture stays off unless you name a screen. `--screenshot-output` is a Wayland output name (`DP-1`) or a monitor index starting at `0`. `--screenshot-every 30` repeats; omit it and capture only when you ask (window key `c` or the tray item).
+
+```bash
+pawnai-recorder record --device-id 0 --screenshot-output DP-1 --screenshot-every 60
+```
+
+Backend choice:
+
+- Wayland with `grim` on `PATH` (preferred; a numeric index is mapped with `swaymsg` when that exists)
+- Wayland without `grim`: xdg-desktop-portal Screenshot (the portal does not pick a monitor; the first call may ask permission)
+- X11: the `mss` package, by monitor index
+
+PNGs are saved next to the audio, uploaded with the same S3 layout, and listed on the `transcribe-diarize` payload as `screenshots` (`region` is reserved and currently `null`). A crop/area comes later.
+
 ### S3-compatible upload organization
 
 > The status command now checks for S3 availability when configuration is
@@ -245,13 +285,15 @@ If upload fails, recording continues and local files are kept.
 ### Local recording log
 
 Every `record` run appends structured entries to a [JSON Lines](https://jsonlines.org/)
-file (`recordings.jsonl`) inside the output directory. Three record types are
-written per session:
+file (`recordings.jsonl`) inside the output directory. Record types written
+per session:
 
 | `type` | `event` | When written | Key fields |
 |--------|---------|--------------|------------|
 | `session` | `start` | Immediately after the stream opens | `session_id`, `conversation_id`, `device_id`, `device_name`, `sample_rate`, `channels`, `format`, `started_at` |
 | `chunk` | — | After each chunk file is saved | `chunk_index`, `file_path`, `duration_sec`, `s3_object_key`, `s3_uploaded`, `started_at` |
+| `note` | — | When you submit a note during the take | `id`, `at`, `text` |
+| `screenshot` | — | When a screen capture is saved | `id`, `at`, `file_path`, `output`, `s3_uri` |
 | `session` | `end` | After all chunks have been saved | `total_duration_sec`, `chunk_count`, `ended_at` |
 
 **Example entries**
@@ -327,14 +369,20 @@ pawnai-recorder/
 │   ├── __main__.py
 │   ├── cli/
 │   │   ├── commands.py
+│   │   ├── session_ui.py     # Textual session window
 │   │   └── utils.py
 │   ├── core/
 │   │   ├── config.py
+│   │   ├── jobs.py           # transcribe-diarize payload and attachment deltas
 │   │   ├── log.py            # JSONL recording log
 │   │   ├── recording.py
+│   │   ├── session.py        # start/stop, notes, screenshots
 │   │   ├── s3_upload.py
 │   │   ├── storage.py
 │   │   └── processing.py
+│   ├── desktop/
+│   │   ├── capture.py        # grim / portal / mss
+│   │   └── tray.py           # status-bar icon
 │   └── utils/
 ├── android/                  # Jetpack Compose recording client
 │   ├── README.md
@@ -368,9 +416,16 @@ The `pyproject.toml` includes configurations for:
 - Python 3.8+
 - PyAudio 0.2.14+
 - Loguru 0.7.2+
-- Typer 0.16.1+
-- Blessed 1.20.0+
-- NumPy 1.26.0+
+- Typer 0.9+
+- NumPy 1.21+
+
+Optional session window, status-bar icon, and X11 screenshots:
+
+```bash
+pip install -e ".[ui]"
+```
+
+That extra installs Textual, pystray, Pillow, mss, and jeepney. Wayland capture prefers the `grim` binary. The portal fallback needs a session bus.
 
 ## Development Dependencies (optional)
 

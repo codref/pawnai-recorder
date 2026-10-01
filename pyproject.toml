@@ -53,6 +53,13 @@ Issues = "https://github.com/pawnai/pawnai-recorder/issues"
 pawnai-recorder = "pawnai_recorder.__main__:main"
 
 [project.optional-dependencies]
+ui = [
+    "textual>=0.47.1",
+    "pystray>=0.19.5",
+    "pillow>=9.0.0",
+    "mss>=9.0.1",
+    "jeepney>=0.8.0",
+]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
@@ -62,7 +69,13 @@ dev = [
 ]
 
 [tool.setuptools]
-packages = ["pawnai_recorder", "pawnai_recorder.cli", "pawnai_recorder.core", "pawnai_recorder.utils"]
+packages = [
+    "pawnai_recorder",
+    "pawnai_recorder.cli",
+    "pawnai_recorder.core",
+    "pawnai_recorder.desktop",
+    "pawnai_recorder.utils",
+]
 
 [tool.black]
 line-length = 100
